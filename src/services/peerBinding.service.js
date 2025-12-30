@@ -8,6 +8,13 @@ import logger from './logger.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const stateDir = path.join(__dirname, '..', 'state');
 const filePath = path.join(stateDir, 'peers.meta.json');
+const INVALID_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
+function assertSafeKey(key) {
+  if (!key || INVALID_KEYS.has(key)) {
+    throw new Error('invalid publicKey');
+  }
+}
 
 async function ensureDir() {
   try { await fs.mkdir(stateDir, { recursive: true }); } catch (e) { /* ignore */ }
@@ -33,6 +40,7 @@ async function save(obj) {
 
 export async function bindPeer({ publicKey, deviceId, mikrotikIp }) {
   if (!publicKey || !deviceId || !mikrotikIp) throw new Error('publicKey, deviceId and mikrotikIp required');
+  assertSafeKey(publicKey);
   const data = await load();
   const now = Math.floor(Date.now() / 1000);
   const existing = data[publicKey];
@@ -50,6 +58,7 @@ export async function bindPeer({ publicKey, deviceId, mikrotikIp }) {
 
 export async function unbindPeer(publicKey) {
   if (!publicKey) throw new Error('publicKey required');
+  assertSafeKey(publicKey);
   const data = await load();
   if (data[publicKey]) {
     delete data[publicKey];
@@ -61,6 +70,7 @@ export async function unbindPeer(publicKey) {
 
 export async function getPeerBinding(publicKey) {
   if (!publicKey) return null;
+  assertSafeKey(publicKey);
   const data = await load();
   return data[publicKey] || null;
 }

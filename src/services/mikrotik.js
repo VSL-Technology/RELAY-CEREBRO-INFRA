@@ -53,9 +53,7 @@ export async function runMikrotikCommands(mikConfig, commands = []) {
   }
 
   if (isDryRun()) {
-    for (const cmd of commands) {
-      console.log(`[relay-mikrotik][DRY_RUN] ${host} > ${cmd}`);
-    }
+    console.log(`[relay-mikrotik][DRY_RUN] ${host} > ${commands.length} command(s)`);
     return result;
   }
 
@@ -74,15 +72,16 @@ export async function runMikrotikCommands(mikConfig, commands = []) {
     const connection = await conn.connect();
     const chan = connection.openChannel("relay-batch");
 
-    for (const cmd of commands) {
+    for (let idx = 0; idx < commands.length; idx += 1) {
+      const cmd = commands[idx];
       try {
-        console.log(`[relay-mikrotik] ${host} > ${cmd}`);
+        console.log(`[relay-mikrotik] ${host} > command #${idx + 1}`);
         await chan.write(cmd);
       } catch (err) {
         const normalized = normalizeMikrotikError(err);
-        console.error(`[relay-mikrotik] ERRO cmd="${cmd}"`, normalized.message);
+        console.error(`[relay-mikrotik] ERRO cmd #${idx + 1}`, normalized.message);
         result.ok = false;
-        result.errors.push({ cmd, message: normalized.message, code: normalized.code });
+        result.errors.push({ cmd: `#${idx + 1}`, message: normalized.message, code: normalized.code });
       }
     }
 

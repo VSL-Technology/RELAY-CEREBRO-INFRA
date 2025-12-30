@@ -79,7 +79,7 @@ function tokenGuard(envName) {
   return (req, res, next) => {
     const expected = process.env[envName];
     const auth = req.headers["authorization"] || "";
-    const m = String(auth).match(/^Bearer\s+(.+)$/i);
+    const m = /^Bearer\s+([A-Za-z0-9._~+-]+)$/.exec(auth.trim());
     const bearer = m ? m[1] : null;
     const got = bearer || req.headers["x-relay-token"];
     if (!expected || got !== expected) {
@@ -125,6 +125,10 @@ function parseJsonBody(req, res, next) {
 }
 const RETRY_NOW_COOLDOWN_MS = Number(process.env.RELAY_RETRY_NOW_COOLDOWN_MS || 30000);
 const lastRetryNowBySid = new Map();
+function rateGuard(req, res, next) {
+  if (!checkRate(req.ip)) return res.status(429).json({ ok: false, code: 'rate_limited' });
+  next();
+}
 if (process.env.RELAY_STRICT_SECURITY === '1' || process.env.RELAY_STRICT_SECURITY === 'true') {
   if (!process.env.RELAY_API_SECRET) {
     logger.error('missing RELAY_API_SECRET while RELAY_STRICT_SECURITY enabled');
@@ -142,6 +146,8 @@ if (!process.env.RELAY_INTERNAL_TOKEN) {
 app.use(express.json());
 // Keep morgan for access logs, but keep minimal formatting to avoid double-logging
 app.use(morgan("combined"));
+// Rate limit simples por IP
+app.use(rateGuard);
 
 // Auth simples por header
 app.use((req, res, next) => {
