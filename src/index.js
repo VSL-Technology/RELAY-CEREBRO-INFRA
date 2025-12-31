@@ -1,6 +1,7 @@
 // src/index.js
 import express from "express";
 import morgan from "morgan";
+import rateLimit from "express-rate-limit";
 import {
   authorizeByPedido,
   resyncDevice,
@@ -39,23 +40,15 @@ if (isProd && !RELAY_API_SECRET) {
   throw new Error("MISCONFIG: RELAY_API_SECRET is required in production");
 }
 
-// basic in-memory rate limiter per IP
+// basic rate limiter (express-rate-limit)
 const rateWindowMs = Number(process.env.RELAY_RATE_WINDOW_MS || 60000);
-const rateLimit = Number(process.env.RELAY_RATE_LIMIT || 60);
-const rateMap = new Map();
-
-function checkRate(ip) {
-  const now = Date.now();
-  const rec = rateMap.get(ip) || { ts: now, count: 0 };
-  if (now - rec.ts > rateWindowMs) {
-    rec.ts = now; rec.count = 1;
-    rateMap.set(ip, rec);
-    return true;
-  }
-  rec.count += 1;
-  rateMap.set(ip, rec);
-  return rec.count <= rateLimit;
-}
+const rateLimitMax = Number(process.env.RELAY_RATE_LIMIT || 60);
+const limiter = rateLimit({
+  windowMs: rateWindowMs,
+  max: rateLimitMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 const app = express();
 
@@ -78,9 +71,11 @@ const requireHmacRaw = express.raw({ type: "*/*", limit: "256kb" });
 function tokenGuard(envName) {
   return (req, res, next) => {
     const expected = process.env[envName];
-    const auth = req.headers["authorization"] || "";
-    const m = /^Bearer\s+([A-Za-z0-9._~+-]+)$/.exec(auth.trim());
-    const bearer = m ? m[1] : null;
+    const auth = (req.headers["authorization"] || "").trim();
+    let bearer = null;
+    if (auth.toLowerCase().startsWith("bearer ")) {
+      bearer = auth.slice(7).trim();
+    }
     const got = bearer || req.headers["x-relay-token"];
     if (!expected || got !== expected) {
       return res.status(401).json({ ok: false, code: "UNAUTHORIZED" });
@@ -125,10 +120,6 @@ function parseJsonBody(req, res, next) {
 }
 const RETRY_NOW_COOLDOWN_MS = Number(process.env.RELAY_RETRY_NOW_COOLDOWN_MS || 30000);
 const lastRetryNowBySid = new Map();
-function rateGuard(req, res, next) {
-  if (!checkRate(req.ip)) return res.status(429).json({ ok: false, code: 'rate_limited' });
-  next();
-}
 if (process.env.RELAY_STRICT_SECURITY === '1' || process.env.RELAY_STRICT_SECURITY === 'true') {
   if (!process.env.RELAY_API_SECRET) {
     logger.error('missing RELAY_API_SECRET while RELAY_STRICT_SECURITY enabled');
@@ -147,7 +138,7 @@ app.use(express.json());
 // Keep morgan for access logs, but keep minimal formatting to avoid double-logging
 app.use(morgan("combined"));
 // Rate limit simples por IP
-app.use(rateGuard);
+app.use(limiter);
 
 // Auth simples por header
 app.use((req, res, next) => {

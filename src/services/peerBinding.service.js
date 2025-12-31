@@ -16,6 +16,15 @@ function assertSafeKey(key) {
   }
 }
 
+function sanitizeLoaded(obj) {
+  const clean = Object.create(null);
+  for (const [k, v] of Object.entries(obj || {})) {
+    if (INVALID_KEYS.has(k)) continue;
+    clean[k] = v;
+  }
+  return clean;
+}
+
 async function ensureDir() {
   try { await fs.mkdir(stateDir, { recursive: true }); } catch (e) { /* ignore */ }
 }
@@ -23,7 +32,7 @@ async function ensureDir() {
 async function load() {
   try {
     const raw = await fs.readFile(filePath, 'utf8');
-    return JSON.parse(raw || '{}');
+    return sanitizeLoaded(JSON.parse(raw || '{}'));
   } catch (e) {
     if (e.code === 'ENOENT') return {};
     logger.error('peerBinding.load_error', { message: e && e.message });
