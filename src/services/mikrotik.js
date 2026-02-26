@@ -2,6 +2,7 @@
 // Executor Mikrotik: único lugar que toca o roteador.
 // Import dinâmico de `mikronode-ng` para permitir DRY_RUN sem precisar da dependência.
 import { normalizeMikrotikError } from './errors/normalizeMikrotikError.js';
+import logger from './logger.js';
 
 const DEBUG_MIKROTIK = process.env.DEBUG_MIKROTIK === '1' || process.env.DEBUG_MIKROTIK === 'true';
 
@@ -55,7 +56,7 @@ export async function runMikrotikCommands(mikConfig, commands = []) {
   }
 
   if (isDryRun()) {
-    if (DEBUG_MIKROTIK) console.log(`[relay-mikrotik][DRY_RUN] commands=${commands.length}`);
+    if (DEBUG_MIKROTIK) logger.debug('relay.mikrotik.dry_run', { commands: commands.length, host });
     return result;
   }
 
@@ -66,7 +67,7 @@ export async function runMikrotikCommands(mikConfig, commands = []) {
     const normalized = normalizeMikrotikError(err);
     result.ok = false;
     result.errors.push({ cmd: "CONNECTION_SETUP", message: normalized.message, code: normalized.code });
-    console.error('[relay-mikrotik] connection_setup_error', { code: normalized.code, message: normalized.message });
+    logger.error('relay.mikrotik.connection_setup_error', { code: normalized.code, message: normalized.message, host });
     throw normalized;
   }
 
@@ -77,11 +78,11 @@ export async function runMikrotikCommands(mikConfig, commands = []) {
     for (let idx = 0; idx < commands.length; idx += 1) {
       const cmd = commands[idx];
       try {
-        if (DEBUG_MIKROTIK) console.log(`[relay-mikrotik] command #${idx + 1}`);
+        if (DEBUG_MIKROTIK) logger.debug('relay.mikrotik.command', { index: idx + 1, host });
         await chan.write(cmd);
       } catch (err) {
         const normalized = normalizeMikrotikError(err);
-        console.error('[relay-mikrotik] error', { cmd: idx + 1, code: normalized.code, message: normalized.message });
+        logger.error('relay.mikrotik.command_error', { index: idx + 1, code: normalized.code, message: normalized.message, host });
         result.ok = false;
         result.errors.push({ cmd: `#${idx + 1}`, message: normalized.message, code: normalized.code });
       }
@@ -99,7 +100,7 @@ export async function runMikrotikCommands(mikConfig, commands = []) {
     }
   } catch (err) {
     const normalized = normalizeMikrotikError(err);
-    console.error('[relay-mikrotik] execution_error', { code: normalized.code, message: normalized.message });
+    logger.error('relay.mikrotik.execution_error', { code: normalized.code, message: normalized.message, host });
     result.ok = false;
     result.errors.push({ cmd: "EXEC", message: normalized.message, code: normalized.code });
     throw normalized;
