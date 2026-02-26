@@ -3,7 +3,6 @@ data/
 events_queue.json
 .env
 .env.*
-# Never commit env templates that may contain real secrets.
 /.env.example
 .DS_Store
 coverage/
