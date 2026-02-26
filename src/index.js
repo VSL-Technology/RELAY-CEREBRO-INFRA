@@ -189,6 +189,11 @@ app.use(express.json({
   },
 }));
 
+// Public healthcheck for deploy validation
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok" });
+});
+
 // Auth simples por header
 app.use((req, res, next) => {
   if (OPEN_TOKEN_PATHS.has(req.path)) return next();

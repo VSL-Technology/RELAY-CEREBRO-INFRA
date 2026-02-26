@@ -17,10 +17,11 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: 22
           script: |
-            echo "USER=${{ secrets.VPS_USER }}"
             cd /opt/lopesul/apps/relay
             git fetch origin
             git reset --hard origin/main
             docker compose down
             docker compose build
             docker compose up -d
+            sleep 5
+            curl -f "http://localhost:${RELAY_HEALTH_PORT:-3001}/health" || exit 1
