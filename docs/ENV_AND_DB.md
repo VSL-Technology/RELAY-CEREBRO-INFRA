@@ -1,9 +1,10 @@
 # Variáveis de ambiente e dados compartilhados (Relay ↔ Backend)
 
 ## Segredos compartilhados com o backend
-- `RELAY_TOKEN`: header `x-relay-token` que o backend envia para o relay.
+- `RELAY_TOKEN`: token base para rotas gerais (`x-relay-token`). Se ausente, o relay usa fallback para `RELAY_TOKEN_TOOLS`/`RELAY_TOKEN_EXEC`.
 - `RELAY_API_SECRET`: HMAC para POST/DELETE/SYNC; backend deve assinar o body e enviar `x-relay-signature` (hex).
 - `RELAY_INTERNAL_TOKEN`: protege endpoints internos; não deve sair do ambiente controlado.
+- `PAGARME_WEBHOOK_SECRET`: valida assinatura do webhook `/api/webhooks/pagarme`.
 - `BACKEND_HMAC_SECRET`: HMAC bidirecional para tráfego de eventos/ACKs (`BACKEND_EVENTS_URL` e `BACKEND_ACK_URL`); precisa ser igual em ambos.
 
 ## Config do consumer de eventos
@@ -21,6 +22,8 @@
 - `MIKROTIK_NODES` **obrigatório**: JSON com id/host/user/pass/port/timeout (ex.: `[{"id":"HOTSPOT-01","host":"10.200.1.10","user":"relay","pass":"<senha>","port":8728}]`).
 - `WG_INTERFACE`: interface WG no host do relay (necessário fora de DRY_RUN).
 - `WG_VPS_PUBLIC_KEY`, `WG_VPS_ENDPOINT`: chave/endpoint do VPS usados em bootstrap/config Mikrotik.
+- `RELAY_PAID_CLIENTS_LIST` (opcional): nome da address-list para clientes pagos (default `paid_clients`).
+- `RELAY_PAID_BINDING_TYPE` (opcional): tipo de `ip-binding` aplicado na liberação (default `bypassed`).
 - `RELAY_RECONCILE_INTERVAL_MS`, `RELAY_RECONCILE_REMOVE`: reconciliador de peers (intervalo e remoção de peers órfãos).
 - Mikrotik meta por device pode ser gravada no registry (deviceId → publicKey → mikrotikIp) para bindings.
 
