@@ -3,6 +3,7 @@ data/
 events_queue.json
 .env
 .env.*
+/.env.example
 .DS_Store
 coverage/
 npm-debug.log*
