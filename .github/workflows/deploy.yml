@@ -28,6 +28,6 @@ jobs:
             sleep 6
 
             echo "Testando health dentro do container..."
-            docker exec relay-real curl -f http://localhost:3000/health || exit 1
+            docker exec relay-real node -e "fetch('http://localhost:3000/health').then(async (r) => { if (!r.ok) throw new Error('health status ' + r.status); const body = await r.json(); if (body.status !== 'ok') throw new Error('invalid health payload'); console.log('health ok'); }).catch((err) => { console.error(err.message); process.exit(1); })" || exit 1
 
             echo "Relay saudável."
