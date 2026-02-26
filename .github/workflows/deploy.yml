@@ -23,5 +23,11 @@ jobs:
             docker compose down
             docker compose build
             docker compose up -d
-            sleep 5
-            curl -f "http://localhost:${RELAY_HEALTH_PORT:-3001}/health" || exit 1
+
+            echo "Aguardando container iniciar..."
+            sleep 6
+
+            echo "Testando health dentro do container..."
+            docker exec relay-real curl -f http://localhost:3000/health || exit 1
+
+            echo "Relay saudável."
