@@ -8,4 +8,3 @@ events_queue.json
 coverage/
 npm-debug.log*
 package-lock.json.tmp
-.env.example
