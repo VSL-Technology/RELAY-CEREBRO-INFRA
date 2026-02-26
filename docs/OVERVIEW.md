@@ -10,7 +10,7 @@
 - **Registro** (`registry/deviceRegistry.js`): devices/peers/tokens unificados em `data/devices.json`.
 
 ## Segurança e HMAC
-- Tokens: `RELAY_TOKEN` (todas as chamadas), `RELAY_INTERNAL_TOKEN` (endpoints internos).
+- Tokens: `RELAY_TOKEN` (token base para chamadas gerais, com fallback para `RELAY_TOKEN_TOOLS`/`RELAY_TOKEN_EXEC`), `RELAY_INTERNAL_TOKEN` (endpoints internos).
 - HMAC: `RELAY_API_SECRET` para POST/DELETE/SYNC; `BACKEND_HMAC_SECRET` para eventos/ACKs (`BACKEND_REQUIRE_HMAC=1` para forçar).
 - Modo estrito: `RELAY_STRICT_SECURITY=1` exige `RELAY_API_SECRET` e `RELAY_INTERNAL_TOKEN` no boot.
 - Rate-limit: `RELAY_RATE_WINDOW_MS`/`RELAY_RATE_LIMIT`.

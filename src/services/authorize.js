@@ -2,6 +2,11 @@
 import { runMikrotikCommands } from "./mikrotik.js";
 import { getMikById } from "../config/mikrotiks.js";
 import { getDeviceByToken } from "./deviceRegistry.js";
+import logger from "./logger.js";
+import {
+  buildAuthorizeCommands,
+  buildRevokeCommands
+} from "./paidClientAccess.js";
 
 function normalizeMac(mac) {
   if (!mac) return null;
@@ -22,30 +27,29 @@ function normalizeIp(ip) {
 export async function authorizeByPedido({ pedidoId, mikId, deviceToken }) {
   const device = getDeviceByToken(deviceToken);
   if (!device) {
+    logger.warn("authorize.device_token_not_found", { pedidoId, mikId, deviceToken });
     throw new Error(`deviceToken não encontrado no relay: ${deviceToken}`);
   }
 
   if (device.mikId !== mikId) {
-    console.warn(
-      `[relay] mikId divergente. token=${deviceToken} esperado=${device.mikId} recebido=${mikId}`
-    );
+    logger.warn("authorize.mik_id_mismatch", {
+      pedidoId,
+      deviceToken,
+      expectedMikId: device.mikId,
+      receivedMikId: mikId
+    });
   }
 
   const ip = normalizeIp(device.ipAtual);
   const mac = normalizeMac(device.macAtual);
 
   if (!ip || !mac) {
+    logger.warn("authorize.device_identity_missing", { pedidoId, mikId, deviceToken, ip, mac });
     throw new Error(`Device sem ip/mac atual. token=${deviceToken}`);
   }
 
   const mik = getMikById(mikId);
-
-  const cmds = [
-    `/ip firewall address-list add list=paid_clients address=${ip} comment="pedido:${pedidoId}"`,
-    `/ip hotspot ip-binding add mac-address=${mac} address=${ip} type=bypassed comment="pedido:${pedidoId}"`,
-    `/ip hotspot host remove   [find mac-address=${mac}]`,
-    `/ip hotspot active remove [find mac-address=${mac}]`
-  ];
+  const cmds = buildAuthorizeCommands({ pedidoId, ip, mac });
 
   const mkResult = await runMikrotikCommands(mik, cmds);
 
@@ -66,17 +70,12 @@ export async function authorizeByPedidoIp({ pedidoId, mikId, ipAtual, macAtual }
   const mac = normalizeMac(macAtual);
 
   if (!pedidoId || !mikId || !ip || !mac) {
+    logger.warn("authorize_by_ip.invalid_payload", { pedidoId, mikId, ip, mac });
     throw new Error("Campos obrigatórios: pedidoId, mikId, ipAtual, macAtual");
   }
 
   const mik = getMikById(mikId);
-
-  const cmds = [
-    `/ip firewall address-list add list=paid_clients address=${ip} comment="pedido:${pedidoId}"`,
-    `/ip hotspot ip-binding add mac-address=${mac} address=${ip} type=bypassed comment="pedido:${pedidoId}"`,
-    `/ip hotspot host remove   [find mac-address=${mac}]`,
-    `/ip hotspot active remove [find mac-address=${mac}]`
-  ];
+  const cmds = buildAuthorizeCommands({ pedidoId, ip, mac });
 
   const mkResult = await runMikrotikCommands(mik, cmds);
 
@@ -120,18 +119,7 @@ export async function revokeBySession({ mikId, ip, mac }) {
   }
 
   const mik = getMikById(mikId);
-
-  const cmds = [];
-
-  if (ipNorm) {
-    cmds.push(`/ip firewall address-list remove [find list=paid_clients address=${ipNorm}]`);
-  }
-
-  if (macNorm) {
-    cmds.push(`/ip hotspot ip-binding remove [find mac-address=${macNorm}]`);
-    cmds.push(`/ip hotspot active remove [find mac-address=${macNorm}]`);
-    cmds.push(`/ip hotspot host remove [find mac-address=${macNorm}]`);
-  }
+  const cmds = buildRevokeCommands({ ip: ipNorm, mac: macNorm });
 
   const mkResult = await runMikrotikCommands(mik, cmds);
 
