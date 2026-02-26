@@ -17,7 +17,7 @@
 ## Segurança
 - Configure `BACKEND_HMAC_SECRET` em ambos os lados para HMAC bidirecional.
 - Use `RELAY_API_SECRET` para HMAC em endpoints HTTP mutáveis (`/devices`, `/mikrotik/bootstrap`, etc).
-- Token de acesso: `RELAY_TOKEN` obrigatório para todas as chamadas do backend; `RELAY_INTERNAL_TOKEN` protege endpoints internos.
+- Token de acesso: usar `RELAY_TOKEN` como token base; se não definido, o relay aceita fallback de escopo (`RELAY_TOKEN_TOOLS`/`RELAY_TOKEN_EXEC`). `RELAY_INTERNAL_TOKEN` protege endpoints internos.
 - Rate-limit: `RELAY_RATE_WINDOW_MS` e `RELAY_RATE_LIMIT`.
 
 ## Observabilidade
