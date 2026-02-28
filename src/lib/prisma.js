@@ -1,5 +1,7 @@
-import { PrismaClient } from "@prisma/client";
+import prismaPkg from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
+
+const { PrismaClient } = prismaPkg;
 
 const globalForPrisma = globalThis;
 
@@ -9,13 +11,21 @@ function getDatabaseUrl() {
 
 function createPrismaClient() {
   const databaseUrl = getDatabaseUrl();
+
   if (!databaseUrl) {
     throw new Error("DATABASE_URL/RELAY_DATABASE_URL not configured");
   }
-  const adapter = new PrismaPg({ connectionString: databaseUrl });
+
+  const adapter = new PrismaPg({
+    connectionString: databaseUrl
+  });
+
   return new PrismaClient({
     adapter,
-    log: process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"]
+    log:
+      process.env.NODE_ENV === "development"
+        ? ["warn", "error"]
+        : ["error"]
   });
 }
 
