@@ -1,4 +1,5 @@
 import prisma from "../lib/prisma.js";
+import { getDefaultTenant } from "../lib/getDefaultTenant.js";
 
 function toDateOrNull(value) {
   if (!value) return null;
@@ -20,7 +21,27 @@ function optional(value) {
   return value === undefined ? undefined : value;
 }
 
+async function resolveTenantId(tenantId) {
+  if (tenantId) return tenantId;
+
+  const existingDefault = await getDefaultTenant();
+  if (existingDefault && existingDefault.id) {
+    return existingDefault.id;
+  }
+
+  const createdDefault = await prisma.tenant.upsert({
+    where: { slug: "default" },
+    update: {},
+    create: {
+      name: "Default",
+      slug: "default"
+    }
+  });
+  return createdDefault.id;
+}
+
 export async function upsertRouter({
+  tenantId,
   busId,
   nome,
   identity,
@@ -38,12 +59,14 @@ export async function upsertRouter({
 } = {}) {
   if (!busId) throw new Error("busId is required");
 
+  const resolvedTenantId = await resolveTenantId(tenantId);
   const normalizedWgPublicKey = wgPublicKey || `pending:${busId}`;
   const normalizedWgIp = wgIp || "0.0.0.0/32";
 
   return prisma.router.upsert({
     where: { busId },
     create: {
+      tenantId: resolvedTenantId,
       busId,
       nome: optional(nome),
       identity: optional(identity),
@@ -67,6 +90,7 @@ export async function upsertRouter({
       apiPasswordEncrypted: optional(apiPasswordEncrypted),
       portaApi: optional(portaApi),
       portaSsh: optional(portaSsh),
+      tenantId: optional(tenantId),
       wgPublicKey: optional(wgPublicKey),
       wgIp: optional(wgIp),
       endpoint: optional(endpoint),
@@ -108,8 +132,14 @@ export async function updateRouterWireguardActual({
   });
 }
 
-export async function listRoutersWithPeers() {
+export async function listRoutersWithPeers({ tenantId } = {}) {
+  return listRouters({ tenantId });
+}
+
+export async function listRouters({ tenantId } = {}) {
+  const where = tenantId ? { tenantId } : undefined;
   return prisma.router.findMany({
+    where,
     include: {
       peers: true
     },
@@ -120,6 +150,7 @@ export async function listRoutersWithPeers() {
 }
 
 export default {
+  listRouters,
   upsertRouter,
   updateRouterWireguardActual,
   listRoutersWithPeers

@@ -20,10 +20,19 @@ function optional(value) {
   return value === undefined ? undefined : value;
 }
 
-export async function findPeerByPublicKey(publicKey) {
+export async function findPeerByPublicKey(publicKey, { tenantId } = {}) {
   if (!publicKey) throw new Error("publicKey is required");
-  return prisma.wireguardPeer.findUnique({
-    where: { publicKey },
+  const where = tenantId
+    ? {
+        publicKey,
+        router: {
+          tenantId
+        }
+      }
+    : { publicKey };
+
+  return prisma.wireguardPeer.findFirst({
+    where,
     include: {
       router: true
     }
@@ -96,13 +105,41 @@ export async function updatePeerActual({
   });
 }
 
-export async function listPeersDesired() {
+export async function listPeersDesired({ tenantId } = {}) {
+  const where = {
+    desiredState: {
+      not: "REMOVED"
+    }
+  };
+
+  if (tenantId) {
+    where.router = {
+      tenantId
+    };
+  }
+
   return prisma.wireguardPeer.findMany({
-    where: {
-      desiredState: {
-        not: "REMOVED"
-      }
+    where,
+    include: {
+      router: true
     },
+    orderBy: {
+      updatedAt: "desc"
+    }
+  });
+}
+
+export async function listPeersWithRouter({ tenantId } = {}) {
+  const where = tenantId
+    ? {
+        router: {
+          tenantId
+        }
+      }
+    : undefined;
+
+  return prisma.wireguardPeer.findMany({
+    where,
     include: {
       router: true
     },
@@ -114,6 +151,7 @@ export async function listPeersDesired() {
 
 export default {
   findPeerByPublicKey,
+  listPeersWithRouter,
   upsertPeer,
   updatePeerActual,
   listPeersDesired
