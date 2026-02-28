@@ -16,8 +16,10 @@ function createPrismaClient() {
     throw new Error("DATABASE_URL/RELAY_DATABASE_URL not configured");
   }
 
+  // Force Prisma to target the relay schema and avoid fallback to public.
   const adapter = new PrismaPg({
-    connectionString: databaseUrl
+    connectionString: databaseUrl,
+    schema: "relay"
   });
 
   return new PrismaClient({
