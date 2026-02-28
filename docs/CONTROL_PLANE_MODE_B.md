@@ -10,6 +10,10 @@ Este modo faz migracao gradual:
 - `CONTROL_PLANE_FALLBACK_JSON` (default: `true`)
 - `CONTROL_PLANE_WRITE_DB` (default: `true`)
 
+## JOB_RUNNER_ENABLED
+- `true` (default): ativa execucao de jobs e mantem comportamento atual (inclui uso de `MIKROTIK_NODES` quando necessario durante processamento)
+- `false`: desativa o JobRunner no boot e ignora validacao de `MIKROTIK_NODES` nessa etapa
+
 ## Modelo de dados
 - `Router`: estado desejado + estado real agregado por roteador
 - `WireguardPeer`: estado desejado + estado real por peer

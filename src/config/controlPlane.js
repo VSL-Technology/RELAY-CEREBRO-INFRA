@@ -7,12 +7,14 @@ function toBool(value, defaultValue) {
 }
 
 const mode = String(process.env.CONTROL_PLANE_MODE || "B").trim().toUpperCase() || "B";
+export const JOB_RUNNER_ENABLED = process.env.JOB_RUNNER_ENABLED !== "false";
 
 const controlPlaneConfig = {
   mode,
   isModeB: mode === "B",
   fallbackJson: toBool(process.env.CONTROL_PLANE_FALLBACK_JSON, true),
-  writeDb: toBool(process.env.CONTROL_PLANE_WRITE_DB, true)
+  writeDb: toBool(process.env.CONTROL_PLANE_WRITE_DB, true),
+  jobRunnerEnabled: JOB_RUNNER_ENABLED
 };
 
 export function getControlPlaneConfig() {

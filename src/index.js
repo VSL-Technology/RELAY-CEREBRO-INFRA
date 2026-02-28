@@ -1,6 +1,7 @@
 // src/index.js
 import express from "express";
 import morgan from "morgan";
+import "dotenv/config";
 import rateLimit from "express-rate-limit";
 import { execFile as _execFile } from "child_process";
 import { promisify } from "util";
@@ -33,7 +34,7 @@ import identityStore from './services/identityStore.js';
 import routerHealth from './services/routerHealth.js';
 import audit from './services/audit.js';
 import { verifyRelaySignature } from "./security/hmacVerify.js";
-import controlPlaneConfig from "./config/controlPlane.js";
+import controlPlaneConfig, { JOB_RUNNER_ENABLED } from "./config/controlPlane.js";
 import { getPrisma } from "./lib/prisma.js";
 
 const startedAt = Date.now();
@@ -957,7 +958,12 @@ app.listen(PORT, process.env.BIND_HOST || "127.0.0.1", () => {
   try {
     const consumer = new EventConsumer();
     consumer.start();
-    jobRunner.startJobRunner();
+    if (JOB_RUNNER_ENABLED) {
+      logger.info("jobRunner.starting");
+      jobRunner.startJobRunner();
+    } else {
+      logger.info("jobRunner.disabled");
+    }
     reconciler.start();
   } catch (e) {
     logger.error('failed to start background services', e && e.message);
