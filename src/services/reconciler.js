@@ -27,6 +27,10 @@ const TENANT_AUTO_DISCOVERY_MODE = String(process.env.TENANT_AUTO_DISCOVERY_MODE
   .trim()
   .toLowerCase();
 const TENANT_IP_MAP_RAW = process.env.TENANT_IP_MAP || "";
+const TENANT_AUTO_DISCOVERY_MODES = new Set(["default", "by-endpoint-ip"]);
+const NORMALIZED_TENANT_AUTO_DISCOVERY_MODE = TENANT_AUTO_DISCOVERY_MODES.has(TENANT_AUTO_DISCOVERY_MODE)
+  ? TENANT_AUTO_DISCOVERY_MODE
+  : "default";
 let lastWgSetupLogAt = 0;
 
 function classifyWgError(err) {
@@ -156,7 +160,7 @@ function resolveTenantForEndpoint({
   tenantIpMap
 }) {
   if (!defaultTenant) return null;
-  if (TENANT_AUTO_DISCOVERY_MODE !== "by-endpoint-ip") return defaultTenant;
+  if (NORMALIZED_TENANT_AUTO_DISCOVERY_MODE !== "by-endpoint-ip") return defaultTenant;
 
   const host = endpointHost(endpoint);
   if (!host) return defaultTenant;
@@ -908,6 +912,12 @@ function start() {
     logger.info("reconciler.disabled");
     return;
   }
+  if (NORMALIZED_TENANT_AUTO_DISCOVERY_MODE !== TENANT_AUTO_DISCOVERY_MODE) {
+    logger.warn("reconciler.invalid_tenant_auto_discovery_mode", {
+      provided: TENANT_AUTO_DISCOVERY_MODE,
+      using: NORMALIZED_TENANT_AUTO_DISCOVERY_MODE
+    });
+  }
   _timer = setInterval(() => {
     reconcileOnce().catch((e) => logger.error("reconciler.unhandled", { message: e && e.message }));
   }, DEFAULT_INTERVAL_MS);
@@ -916,7 +926,8 @@ function start() {
     remove: SHOULD_REMOVE,
     controlPlaneMode: controlPlaneConfig.mode,
     fallbackJson: controlPlaneConfig.fallbackJson,
-    writeDb: controlPlaneConfig.writeDb
+    writeDb: controlPlaneConfig.writeDb,
+    tenantAutoDiscoveryMode: NORMALIZED_TENANT_AUTO_DISCOVERY_MODE
   });
 }
 
