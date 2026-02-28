@@ -8,3 +8,4 @@ events_queue.json
 coverage/
 npm-debug.log*
 package-lock.json.tmp
+*.bak

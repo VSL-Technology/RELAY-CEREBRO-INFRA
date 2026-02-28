@@ -57,6 +57,7 @@ const RELAY_TOKEN = process.env.RELAY_TOKEN;
 const DEFAULT_ACCESS_TOKEN =
   RELAY_TOKEN || process.env.RELAY_TOKEN_TOOLS || process.env.RELAY_TOKEN_EXEC || null;
 const OPEN_TOKEN_PATHS = new Set([
+  '/relay/health',
   '/relay/arp-print',
   '/relay/ping',
   '/relay/exec-by-device',

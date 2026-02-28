@@ -1,0 +1,47 @@
+services:
+  relay:
+    build: .
+    container_name: relay-real
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    # 👇 Compartilha a stack de rede do host (necessário para enxergar wg0)
+    network_mode: host
+
+    # 🔐 Permissões necessárias para WireGuard
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+
+    devices:
+      - /dev/net/tun
+
+    security_opt:
+      - no-new-privileges:true
+      - apparmor=unconfined
+
+    # 🧠 Healthcheck interno
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # 📊 Limite básico de memória
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.relay.rule=Host(`relay.3fconnet.cloud`)"
+      - "traefik.http.routers.relay.entrypoints=websecure"
+      - "traefik.http.routers.relay.tls.certresolver=le"
+      - "traefik.http.services.relay.loadbalancer.server.port=3000"
+      - "traefik.http.middlewares.relay-sec.headers.sslRedirect=true"
+      - "traefik.http.middlewares.relay-sec.headers.stsSeconds=31536000"
+      - "traefik.http.routers.relay.middlewares=relay-sec@docker"
