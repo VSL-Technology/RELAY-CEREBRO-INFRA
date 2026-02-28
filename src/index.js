@@ -2,6 +2,8 @@
 import express from "express";
 import morgan from "morgan";
 import rateLimit from "express-rate-limit";
+import { execFile as _execFile } from "child_process";
+import { promisify } from "util";
 import {
   authorizeByPedido,
   resyncDevice,
@@ -31,8 +33,11 @@ import identityStore from './services/identityStore.js';
 import routerHealth from './services/routerHealth.js';
 import audit from './services/audit.js';
 import { verifyRelaySignature } from "./security/hmacVerify.js";
+import controlPlaneConfig from "./config/controlPlane.js";
+import { getPrisma } from "./lib/prisma.js";
 
 const startedAt = Date.now();
+const execFile = promisify(_execFile);
 
 // auth: if RELAY_API_SECRET is set, require HMAC signature on POST/DELETE/SYNC endpoints
 const RELAY_API_SECRET = process.env.RELAY_API_SECRET || null;
@@ -190,9 +195,40 @@ app.use(express.json({
   },
 }));
 
+async function getDbHealth() {
+  try {
+    const prisma = getPrisma();
+    await prisma.$queryRaw`SELECT 1`;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function getWireguardInterfaceHealth() {
+  const iface = process.env.WG_INTERFACE || "wg0";
+  const isDryRun = process.env.RELAY_DRY_RUN === "1" || process.env.RELAY_DRY_RUN === "true";
+  if (isDryRun) return { interface: iface, present: true };
+  try {
+    await execFile("wg", ["show", iface]);
+    return { interface: iface, present: true };
+  } catch (_) {
+    return { interface: iface, present: false };
+  }
+}
+
 // Public healthcheck for deploy validation
-app.get("/health", (req, res) => {
-  res.status(200).json({ status: "ok" });
+app.get("/health", async (req, res) => {
+  const [dbConnected, wg] = await Promise.all([getDbHealth(), getWireguardInterfaceHealth()]);
+  res.status(200).json({
+    status: "ok",
+    controlPlane: {
+      mode: controlPlaneConfig.mode,
+      dbConnected,
+      wgInterface: wg.interface,
+      wgInterfacePresent: wg.present
+    }
+  });
 });
 
 // Auth simples por header
