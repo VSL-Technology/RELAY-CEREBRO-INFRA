@@ -1,0 +1,35 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Router {
+  id            String   @id @default(cuid())
+  busId         String   @unique
+  wgPublicKey   String
+  wgIp          String
+  endpoint      String?
+  desiredState  String   @default("PENDING")
+  actualState   String?
+  lastHandshake DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  peers         WireguardPeer[]
+}
+
+model WireguardPeer {
+  id            String   @id @default(cuid())
+  routerId      String
+  publicKey     String
+  allowedIps    String
+  keepalive     Int      @default(25)
+  status        String   @default("UNKNOWN")
+  lastHandshake DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  router Router @relation(fields: [routerId], references: [id])
+}
