@@ -1,5 +1,6 @@
 generator client {
   provider = "prisma-client-js"
+  engineType = "binary"
 }
 
 datasource db {
@@ -7,29 +8,48 @@ datasource db {
 }
 
 model Router {
-  id            String   @id @default(cuid())
-  busId         String   @unique
-  wgPublicKey   String
-  wgIp          String
-  endpoint      String?
-  desiredState  String   @default("PENDING")
-  actualState   String?
-  lastHandshake DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  peers         WireguardPeer[]
+  id                   String   @id @default(cuid())
+  busId                String   @unique
+  nome                 String?
+  identity             String?
+  ipLan                String?
+  apiUser              String?
+  apiPasswordEncrypted String?
+  portaApi             Int?
+  portaSsh             Int?
+  wgPublicKey          String
+  wgIp                 String
+  endpoint             String?
+  keepalive            Int?
+  status               String?
+  desiredState         String   @default("PENDING")
+  actualState          String?
+  statusWireguard      String?
+  lastHandshake        DateTime?
+  lastSeenAt           DateTime?
+  bytesRx              BigInt?
+  bytesTx              BigInt?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  peers                WireguardPeer[]
 }
 
 model WireguardPeer {
-  id            String   @id @default(cuid())
-  routerId      String
-  publicKey     String
-  allowedIps    String
-  keepalive     Int      @default(25)
-  status        String   @default("UNKNOWN")
-  lastHandshake DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id                  String   @id @default(cuid())
+  routerId            String
+  publicKey           String   @unique
+  allowedIps          String
+  endpoint            String?
+  keepalive           Int      @default(25)
+  persistentKeepalive Int?
+  desiredState        String   @default("PENDING")
+  actualState         String?
+  status              String   @default("UNKNOWN")
+  lastHandshake       DateTime?
+  bytesRx             BigInt?
+  bytesTx             BigInt?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 
   router Router @relation(fields: [routerId], references: [id])
 }

@@ -1,0 +1,26 @@
+-- Control Plane Mode B - extend Router/WireguardPeer for desired/actual state
+
+ALTER TABLE "Router"
+  ADD COLUMN IF NOT EXISTS "nome" TEXT,
+  ADD COLUMN IF NOT EXISTS "identity" TEXT,
+  ADD COLUMN IF NOT EXISTS "ipLan" TEXT,
+  ADD COLUMN IF NOT EXISTS "apiUser" TEXT,
+  ADD COLUMN IF NOT EXISTS "apiPasswordEncrypted" TEXT,
+  ADD COLUMN IF NOT EXISTS "portaApi" INTEGER,
+  ADD COLUMN IF NOT EXISTS "portaSsh" INTEGER,
+  ADD COLUMN IF NOT EXISTS "keepalive" INTEGER,
+  ADD COLUMN IF NOT EXISTS "status" TEXT,
+  ADD COLUMN IF NOT EXISTS "statusWireguard" TEXT,
+  ADD COLUMN IF NOT EXISTS "lastSeenAt" TIMESTAMP(3),
+  ADD COLUMN IF NOT EXISTS "bytesRx" BIGINT,
+  ADD COLUMN IF NOT EXISTS "bytesTx" BIGINT;
+
+ALTER TABLE "WireguardPeer"
+  ADD COLUMN IF NOT EXISTS "endpoint" TEXT,
+  ADD COLUMN IF NOT EXISTS "persistentKeepalive" INTEGER,
+  ADD COLUMN IF NOT EXISTS "desiredState" TEXT NOT NULL DEFAULT 'PENDING',
+  ADD COLUMN IF NOT EXISTS "actualState" TEXT,
+  ADD COLUMN IF NOT EXISTS "bytesRx" BIGINT,
+  ADD COLUMN IF NOT EXISTS "bytesTx" BIGINT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS "WireguardPeer_publicKey_key" ON "WireguardPeer"("publicKey");
