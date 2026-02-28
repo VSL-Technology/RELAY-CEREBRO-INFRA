@@ -89,7 +89,9 @@ export async function updatePeerActual({
 export async function listPeersDesired() {
   return prisma.wireguardPeer.findMany({
     where: {
-      OR: [{ desiredState: null }, { desiredState: { not: "REMOVED" } }]
+      desiredState: {
+        not: "REMOVED"
+      }
     },
     include: {
       router: true
