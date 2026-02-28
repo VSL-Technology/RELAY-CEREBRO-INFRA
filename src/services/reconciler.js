@@ -6,10 +6,16 @@ import deviceRegistry from "../registry/deviceRegistry.js";
 import peerBinding from "./peerBinding.service.js";
 import wireguardStatus from "./wireguardStatus.js";
 import controlPlaneConfig from "../config/controlPlane.js";
-import { listPeersDesired, updatePeerActual } from "../repositories/wireguardPeerRepository.js";
+import {
+  listPeersDesired,
+  updatePeerActual,
+  upsertPeer,
+  findPeerByPublicKey
+} from "../repositories/wireguardPeerRepository.js";
 import {
   listRoutersWithPeers,
-  updateRouterWireguardActual
+  updateRouterWireguardActual,
+  upsertRouter
 } from "../repositories/routerRepository.js";
 
 const DEFAULT_INTERVAL_MS = Number(process.env.RELAY_RECONCILE_INTERVAL_MS || 60000);
@@ -104,6 +110,116 @@ function deriveRouterStatus(statuses = []) {
   if (statuses.some((s) => s === "NEVER_CONNECTED")) return "NEVER_CONNECTED";
   if (statuses.some((s) => s === "MISSING")) return "MISSING";
   return "UNKNOWN";
+}
+
+function autoBusId(publicKey) {
+  const suffix = String(publicKey || "").slice(0, 8);
+  return `auto-${suffix}`;
+}
+
+function endpointHost(endpoint) {
+  if (!endpoint) return null;
+  const raw = String(endpoint).trim();
+  if (!raw || raw === "(none)") return null;
+  if (raw.startsWith("[")) {
+    const end = raw.indexOf("]");
+    if (end > 1) return raw.slice(1, end);
+  }
+  const lastColon = raw.lastIndexOf(":");
+  if (lastColon > 0) return raw.slice(0, lastColon);
+  return raw;
+}
+
+async function autoDiscoverPeer({
+  peer,
+  now,
+  statusMap
+} = {}) {
+  if (!peer || !peer.publicKey) return false;
+
+  const existing = await findPeerByPublicKey(peer.publicKey);
+  if (existing) return false;
+
+  const status = statusMap.get(peer.publicKey) || peer.status || null;
+  const actualStatus = (status && status.status) || "ONLINE";
+  const endpoint = (status && status.endpoint) || (peer.raw && peer.raw.endpoint) || null;
+  const allowedIps =
+    normalizeAllowed((status && status.allowedIps) || (peer.raw && peer.raw.allowedIps) || peer.allowed) ||
+    "0.0.0.0/32";
+  const lastHandshakeAt = deriveLastHandshakeAt(status, now);
+  const bytesRx = status ? status.rx : null;
+  const bytesTx = status ? status.tx : null;
+  const busId = autoBusId(peer.publicKey);
+  const fallbackWgPublicKey = `pending:${busId}`;
+  const fallbackWgIp = "0.0.0.0/32";
+
+  const router = await upsertRouter({
+    busId,
+    wgPublicKey: fallbackWgPublicKey,
+    wgIp: fallbackWgIp,
+    desiredState: "ACTIVE",
+    status: "ACTIVE"
+  });
+
+  await upsertPeer({
+    routerId: router.id,
+    publicKey: peer.publicKey,
+    allowedIps,
+    endpoint,
+    desiredStatus: "ACTIVE"
+  });
+
+  await updatePeerActual({
+    publicKey: peer.publicKey,
+    actualStatus,
+    lastHandshakeAt,
+    bytesRx,
+    bytesTx
+  });
+
+  await updateRouterWireguardActual({
+    routerId: router.id,
+    busId: router.busId,
+    statusWireguard: actualStatus,
+    lastHandshakeAt,
+    bytesRx,
+    bytesTx,
+    lastSeenAt: new Date(now)
+  });
+
+  const host = endpointHost(endpoint);
+  if (host) {
+    try {
+      await peerBinding.bindPeer({
+        publicKey: peer.publicKey,
+        deviceId: router.busId,
+        mikrotikIp: host
+      });
+      metrics.inc("reconciler.binding_created");
+      logger.info("reconciler.binding_created", {
+        publicKey: peer.publicKey,
+        deviceId: router.busId,
+        mikrotikIp: host
+      });
+    } catch (e) {
+      metrics.inc("reconciler.binding_error");
+      logger.error("reconciler.binding_error", {
+        publicKey: peer.publicKey,
+        deviceId: router.busId,
+        message: e && e.message
+      });
+    }
+  }
+
+  logger.info("reconciler.auto_discovered_peer", {
+    publicKey: peer.publicKey,
+    busId: router.busId,
+    routerId: router.id,
+    endpoint,
+    actualState: actualStatus
+  });
+  metrics.inc("reconciler.auto_discovered_peer");
+  return true;
 }
 
 async function persistActualStateToDb({ peersDesired = [], routers = [], statusMap = new Map(), now = Date.now() }) {
@@ -319,6 +435,33 @@ async function reconcileOnce() {
     }
   }
 
+  const autoDiscoveredPublicKeys = new Set();
+  const allowAutoDiscovery =
+    controlPlaneConfig.isModeB &&
+    controlPlaneConfig.writeDb &&
+    usingDbDesired &&
+    !usedFallbackJson;
+  if (allowAutoDiscovery) {
+    for (const item of toRemove) {
+      try {
+        const discovered = await autoDiscoverPeer({
+          peer: item,
+          now,
+          statusMap
+        });
+        if (discovered) {
+          autoDiscoveredPublicKeys.add(item.publicKey);
+        }
+      } catch (e) {
+        metrics.inc("reconciler.auto_discovery_failed");
+        logger.error("reconciler.auto_discovery_failed", {
+          publicKey: item && item.publicKey,
+          message: e && e.message
+        });
+      }
+    }
+  }
+
   // Detect peers offline or missing binding
   for (const a of actualList) {
     if (a.status && a.status.status === "OFFLINE") {
@@ -326,7 +469,7 @@ async function reconcileOnce() {
       logger.warn("reconciler.peer_offline", { publicKey: a.publicKey, deviceId: a.deviceId, endpoint: a.raw && a.raw.endpoint });
       // if allowedIps matches desired and binding exists, schedule reapply minimal config? best-effort: handled via desired entries
     }
-    if (!a.binding) {
+    if (!a.binding && !autoDiscoveredPublicKeys.has(a.publicKey)) {
       metrics.inc("reconciler.missing_binding");
       logger.warn("reconciler.missing_binding", { publicKey: a.publicKey, deviceId: a.deviceId });
     }
@@ -365,6 +508,9 @@ async function reconcileOnce() {
   }
 
   for (const item of toRemove) {
+    if (autoDiscoveredPublicKeys.has(item.publicKey)) {
+      continue;
+    }
     if (!SHOULD_REMOVE) {
       logger.warn("reconciler.extra_peer_detected", { publicKey: item.publicKey, endpoint: item.raw && item.raw.endpoint });
       metrics.inc("reconciler.extra_peer");

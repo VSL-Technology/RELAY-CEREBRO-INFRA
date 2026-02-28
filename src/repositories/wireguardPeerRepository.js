@@ -20,6 +20,16 @@ function optional(value) {
   return value === undefined ? undefined : value;
 }
 
+export async function findPeerByPublicKey(publicKey) {
+  if (!publicKey) throw new Error("publicKey is required");
+  return prisma.wireguardPeer.findUnique({
+    where: { publicKey },
+    include: {
+      router: true
+    }
+  });
+}
+
 export async function upsertPeer({
   routerId,
   publicKey,
@@ -103,6 +113,7 @@ export async function listPeersDesired() {
 }
 
 export default {
+  findPeerByPublicKey,
   upsertPeer,
   updatePeerActual,
   listPeersDesired
