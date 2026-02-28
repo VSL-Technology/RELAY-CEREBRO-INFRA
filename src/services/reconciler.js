@@ -5,6 +5,12 @@ import wireguard from "./wireguardManager.js";
 import deviceRegistry from "../registry/deviceRegistry.js";
 import peerBinding from "./peerBinding.service.js";
 import wireguardStatus from "./wireguardStatus.js";
+import controlPlaneConfig from "../config/controlPlane.js";
+import { listPeersDesired, updatePeerActual } from "../repositories/wireguardPeerRepository.js";
+import {
+  listRoutersWithPeers,
+  updateRouterWireguardActual
+} from "../repositories/routerRepository.js";
 
 const DEFAULT_INTERVAL_MS = Number(process.env.RELAY_RECONCILE_INTERVAL_MS || 60000);
 const SHOULD_REMOVE = process.env.RELAY_RECONCILE_REMOVE === "1" || process.env.RELAY_RECONCILE_REMOVE === "true";
@@ -37,7 +43,7 @@ function normalizeAllowed(allowed) {
     .join(",");
 }
 
-function buildDesired() {
+function buildDesiredFromJson() {
   const items = deviceRegistry.listDevices() || [];
   return items
     .filter((d) => d.publicKey && d.allowedIps)
@@ -47,6 +53,29 @@ function buildDesired() {
       allowed: normalizeAllowed(d.allowedIps),
       mikrotikIp: d.meta && d.meta.mikrotik && d.meta.mikrotik.publicIp ? d.meta.mikrotik.publicIp : null
     }));
+}
+
+async function readDesiredFromDb() {
+  const [peersDesired, routers] = await Promise.all([
+    listPeersDesired(),
+    listRoutersWithPeers()
+  ]);
+
+  const desired = (peersDesired || [])
+    .filter((p) => p && p.publicKey && p.allowedIps)
+    .map((p) => ({
+      deviceId: (p.router && p.router.busId) || p.routerId,
+      routerId: p.routerId,
+      publicKey: p.publicKey,
+      allowed: normalizeAllowed(p.allowedIps),
+      mikrotikIp: (p.router && p.router.ipLan) || null
+    }));
+
+  return {
+    desired,
+    peersDesired,
+    routers
+  };
 }
 
 function buildActual(peers = [], bindings = [], statusMap = new Map()) {
@@ -61,8 +90,159 @@ function buildActual(peers = [], bindings = [], statusMap = new Map()) {
   }));
 }
 
+function deriveLastHandshakeAt(peerStatus, now = Date.now()) {
+  if (!peerStatus || peerStatus.handshakeAge === null || peerStatus.handshakeAge === undefined) return null;
+  const age = Number(peerStatus.handshakeAge);
+  if (!Number.isFinite(age) || age < 0) return null;
+  return new Date(now - age * 1000);
+}
+
+function deriveRouterStatus(statuses = []) {
+  if (!statuses.length) return "NO_PEERS";
+  if (statuses.some((s) => s === "ONLINE")) return "ONLINE";
+  if (statuses.some((s) => s === "OFFLINE")) return "OFFLINE";
+  if (statuses.some((s) => s === "NEVER_CONNECTED")) return "NEVER_CONNECTED";
+  if (statuses.some((s) => s === "MISSING")) return "MISSING";
+  return "UNKNOWN";
+}
+
+async function persistActualStateToDb({ peersDesired = [], routers = [], statusMap = new Map(), now = Date.now() }) {
+  const routersById = new Map((routers || []).map((r) => [r.id, r]));
+  const routerAgg = new Map();
+
+  let peerUpdates = 0;
+  let peerErrors = 0;
+  for (const desiredPeer of peersDesired || []) {
+    if (!desiredPeer || !desiredPeer.publicKey) continue;
+    const status = statusMap.get(desiredPeer.publicKey) || null;
+    const actualStatus = status ? status.status : "MISSING";
+    const lastHandshakeAt = deriveLastHandshakeAt(status, now);
+    const bytesRx = status ? status.rx : null;
+    const bytesTx = status ? status.tx : null;
+
+    try {
+      await updatePeerActual({
+        publicKey: desiredPeer.publicKey,
+        actualStatus,
+        lastHandshakeAt,
+        bytesRx,
+        bytesTx
+      });
+      peerUpdates += 1;
+    } catch (e) {
+      peerErrors += 1;
+      logger.error("reconciler.write_db_fail", {
+        scope: "peer",
+        publicKey: desiredPeer.publicKey,
+        message: e && e.message
+      });
+    }
+
+    const key = desiredPeer.routerId;
+    if (!key) continue;
+    if (!routerAgg.has(key)) {
+      routerAgg.set(key, {
+        statuses: [],
+        bytesRx: 0n,
+        bytesTx: 0n,
+        lastHandshakeAt: null
+      });
+    }
+    const agg = routerAgg.get(key);
+    agg.statuses.push(actualStatus);
+    if (status) {
+      try {
+        agg.bytesRx += BigInt(status.rx || 0);
+        agg.bytesTx += BigInt(status.tx || 0);
+      } catch (_) {
+        // ignore malformed byte metrics
+      }
+      if (lastHandshakeAt && (!agg.lastHandshakeAt || lastHandshakeAt > agg.lastHandshakeAt)) {
+        agg.lastHandshakeAt = lastHandshakeAt;
+      }
+    }
+  }
+
+  let routerUpdates = 0;
+  let routerErrors = 0;
+  for (const [routerId, agg] of routerAgg.entries()) {
+    const router = routersById.get(routerId);
+    if (!router) continue;
+    const statusWireguard = deriveRouterStatus(agg.statuses);
+    try {
+      await updateRouterWireguardActual({
+        routerId,
+        busId: router.busId,
+        statusWireguard,
+        lastHandshakeAt: agg.lastHandshakeAt,
+        bytesRx: agg.bytesRx,
+        bytesTx: agg.bytesTx,
+        lastSeenAt: new Date(now)
+      });
+      routerUpdates += 1;
+    } catch (e) {
+      routerErrors += 1;
+      logger.error("reconciler.write_db_fail", {
+        scope: "router",
+        routerId,
+        busId: router.busId,
+        message: e && e.message
+      });
+    }
+  }
+
+  logger.info("reconciler.write_db_ok", {
+    peerUpdates,
+    peerErrors,
+    routerUpdates,
+    routerErrors
+  });
+}
+
 async function reconcileOnce() {
-  const desired = buildDesired();
+  const now = Date.now();
+  let desired = [];
+  let peersDesiredFromDb = [];
+  let routersFromDb = [];
+  let usingDbDesired = false;
+  let usedFallbackJson = false;
+
+  if (controlPlaneConfig.isModeB) {
+    try {
+      const dbState = await readDesiredFromDb();
+      desired = dbState.desired;
+      peersDesiredFromDb = dbState.peersDesired;
+      routersFromDb = dbState.routers;
+      usingDbDesired = true;
+      logger.info("reconciler.db_read_ok", {
+        peersDesired: peersDesiredFromDb.length,
+        routers: routersFromDb.length
+      });
+
+      if (desired.length === 0 && controlPlaneConfig.fallbackJson) {
+        desired = buildDesiredFromJson();
+        usedFallbackJson = true;
+        logger.warn("reconciler.fallback_json_used", {
+          reason: "db_desired_empty",
+          desiredFromJson: desired.length
+        });
+      }
+    } catch (e) {
+      logger.error("reconciler.db_read_fail", { message: e && e.message });
+      if (!controlPlaneConfig.fallbackJson) {
+        return;
+      }
+      desired = buildDesiredFromJson();
+      usedFallbackJson = true;
+      logger.warn("reconciler.fallback_json_used", {
+        reason: "db_unavailable",
+        desiredFromJson: desired.length
+      });
+    }
+  } else {
+    desired = buildDesiredFromJson();
+  }
+
   let actual = [];
   let bindings = [];
   let status = [];
@@ -91,12 +271,34 @@ async function reconcileOnce() {
   try {
     const st = await wireguardStatus.getPeersStatus();
     status = st && st.peers ? st.peers : [];
+    if (st && st.ok === false) {
+      logger.error("reconciler.wg_dump_fail", { message: st.error || "wg dump failed" });
+    } else {
+      logger.info("reconciler.wg_dump_ok", { peers: status.length });
+    }
   } catch (e) {
+    logger.error("reconciler.wg_dump_fail", { message: e && e.message });
     logger.error("reconciler.status_error", { message: e && e.message });
     metrics.inc("reconciler.status_error");
   }
 
   const statusMap = new Map(status.map((s) => [s.publicKey, s]));
+
+  if (controlPlaneConfig.isModeB && controlPlaneConfig.writeDb && usingDbDesired && !usedFallbackJson) {
+    try {
+      await persistActualStateToDb({
+        peersDesired: peersDesiredFromDb,
+        routers: routersFromDb,
+        statusMap,
+        now
+      });
+    } catch (e) {
+      logger.error("reconciler.write_db_fail", {
+        scope: "batch",
+        message: e && e.message
+      });
+    }
+  }
 
   const actualList = buildActual(actual, bindings, statusMap);
   const actualMap = new Map(actualList.map((p) => [p.publicKey, p]));
@@ -195,7 +397,13 @@ function start() {
   _timer = setInterval(() => {
     reconcileOnce().catch((e) => logger.error("reconciler.unhandled", { message: e && e.message }));
   }, DEFAULT_INTERVAL_MS);
-  logger.info("reconciler.started", { intervalMs: DEFAULT_INTERVAL_MS, remove: SHOULD_REMOVE });
+  logger.info("reconciler.started", {
+    intervalMs: DEFAULT_INTERVAL_MS,
+    remove: SHOULD_REMOVE,
+    controlPlaneMode: controlPlaneConfig.mode,
+    fallbackJson: controlPlaneConfig.fallbackJson,
+    writeDb: controlPlaneConfig.writeDb
+  });
 }
 
 function stop() {
