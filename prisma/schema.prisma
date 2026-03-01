@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client-js"
+  engineType = "binary"
+}
+
+datasource db {
+  provider = "postgresql"
+  schemas  = ["relay"]
+}
+
+model Router {
+  id                   String   @id @default(cuid())
+  busId                String   @unique
+  nome                 String?
+  identity             String?
+  ipLan                String?
+  apiUser              String?
+  apiPasswordEncrypted String?
+  portaApi             Int?
+  portaSsh             Int?
+  wgPublicKey          String
+  wgIp                 String
+  endpoint             String?
+  keepalive            Int?
+  status               String?
+  desiredState         String   @default("PENDING")
+  actualState          String?
+  statusWireguard      String?
+  lastHandshake        DateTime?
+  lastSeenAt           DateTime?
+  bytesRx              BigInt?
+  bytesTx              BigInt?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  peers                WireguardPeer[]
+
+  @@schema("relay")
+}
+
+model WireguardPeer {
+  id                  String   @id @default(cuid())
+  routerId            String
+  publicKey           String   @unique
+  allowedIps          String
+  endpoint            String?
+  keepalive           Int      @default(25)
+  persistentKeepalive Int?
+  desiredState        String   @default("PENDING")
+  actualState         String?
+  status              String   @default("UNKNOWN")
+  lastHandshake       DateTime?
+  bytesRx             BigInt?
+  bytesTx             BigInt?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  router Router @relation(fields: [routerId], references: [id])
+
+  @@schema("relay")
+}

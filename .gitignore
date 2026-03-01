@@ -9,3 +9,5 @@ coverage/
 npm-debug.log*
 package-lock.json.tmp
 *.bak
+
+/src/generated/prisma
