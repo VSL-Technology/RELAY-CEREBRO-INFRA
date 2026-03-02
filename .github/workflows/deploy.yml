@@ -1,5 +1,8 @@
 name: deploy-relay
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: ["main"]
