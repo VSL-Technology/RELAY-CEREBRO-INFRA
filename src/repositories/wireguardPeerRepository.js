@@ -1,4 +1,5 @@
 import prisma from "../lib/prisma.js";
+import { validateWgPublicKey } from "../bootstrap/validators.js";
 
 function toDateOrNull(value) {
   if (!value) return null;
@@ -21,15 +22,15 @@ function optional(value) {
 }
 
 export async function findPeerByPublicKey(publicKey, { tenantId } = {}) {
-  if (!publicKey) throw new Error("publicKey is required");
+  const normalizedPublicKey = validateWgPublicKey(publicKey);
   const where = tenantId
     ? {
-        publicKey,
+        publicKey: normalizedPublicKey,
         router: {
           tenantId
         }
       }
-    : { publicKey };
+    : { publicKey: normalizedPublicKey };
 
   return prisma.wireguardPeer.findFirst({
     where,
@@ -48,8 +49,8 @@ export async function upsertPeer({
   desiredStatus
 } = {}) {
   if (!routerId) throw new Error("routerId is required");
-  if (!publicKey) throw new Error("publicKey is required");
   if (!allowedIps) throw new Error("allowedIps is required");
+  const normalizedPublicKey = validateWgPublicKey(publicKey);
 
   const keepalive =
     persistentKeepalive === undefined || persistentKeepalive === null
@@ -57,10 +58,10 @@ export async function upsertPeer({
       : Number(persistentKeepalive);
 
   return prisma.wireguardPeer.upsert({
-    where: { publicKey },
+    where: { publicKey: normalizedPublicKey },
     create: {
       routerId,
-      publicKey,
+      publicKey: normalizedPublicKey,
       allowedIps,
       endpoint: optional(endpoint),
       keepalive,
@@ -88,10 +89,10 @@ export async function updatePeerActual({
   bytesRx,
   bytesTx
 } = {}) {
-  if (!publicKey) throw new Error("publicKey is required");
+  const normalizedPublicKey = validateWgPublicKey(publicKey);
 
   return prisma.wireguardPeer.update({
-    where: { publicKey },
+    where: { publicKey: normalizedPublicKey },
     data: {
       actualState: optional(actualStatus),
       status: optional(actualStatus),
