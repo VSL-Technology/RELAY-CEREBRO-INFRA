@@ -1,6 +1,5 @@
 // src/services/mikrotik.js
-// MikroTik API wrapper (Node 20 + ESM) usando mikronode-ng via getConnection().
-// Corrige: "MikroNodeCtor is not a constructor"
+// MikroTik API wrapper (Node 20 + ESM) usando mikronode-ng.
 
 import { createRequire } from "module";
 import logger from "./logger.js";
@@ -8,103 +7,220 @@ import logger from "./logger.js";
 const require = createRequire(import.meta.url);
 const { getConnection, parseItems } = require("mikronode-ng");
 
-function pick(v, ...keys) {
-  for (const k of keys) {
-    if (v && v[k] !== undefined && v[k] !== null && String(v[k]).length) return v[k];
+const DEFAULT_TIMEOUT_MS = Number(process.env.MIKROTIK_TIMEOUT_MS || 8000);
+
+function pick(value, ...keys) {
+  for (const key of keys) {
+    if (value && value[key] !== undefined && value[key] !== null && String(value[key]).length > 0) {
+      return value[key];
+    }
   }
   return undefined;
 }
 
-function normalizeMik(mik) {
+function normalizeMikConfig(mik) {
   const host =
     pick(mik, "host", "ip", "publicIp", "mikrotikIp", "address") ||
-    pick(mik?.mikrotik, "host", "ip", "publicIp");
+    pick(mik?.mikrotik, "host", "ip", "publicIp", "address");
 
   const user =
     pick(mik, "user", "apiUser", "username") ||
-    pick(mik?.mikrotik, "apiUser", "user", "username");
+    pick(mik?.mikrotik, "user", "apiUser", "username");
 
-  const password =
+  const pass =
     pick(mik, "pass", "password", "apiPassword") ||
-    pick(mik?.mikrotik, "apiPassword", "password", "pass");
+    pick(mik?.mikrotik, "pass", "password", "apiPassword");
 
   const portRaw =
     pick(mik, "port", "apiPort") ||
-    pick(mik?.mikrotik, "apiPort", "port");
+    pick(mik?.mikrotik, "port", "apiPort");
 
   const port = portRaw ? Number(portRaw) : 8728;
 
-  if (!host || !user || !password) {
-    throw new Error(`mikrotik config inválida: host/user/password obrigatórios (host=${host}, user=${user})`);
+  if (!host || !user || !pass) {
+    throw new Error(`mikrotik config inválida: host/user/pass obrigatórios (host=${host}, user=${user})`);
   }
-  return { host, user, password, port };
+
+  if (!Number.isInteger(port) || port <= 0) {
+    throw new Error(`mikrotik config inválida: port inválida (${portRaw})`);
+  }
+
+  return { host, user, pass, port };
 }
 
-function normalizeResult(raw) {
-  // mikronode-ng costuma retornar "sentences" (array) ou objeto com "data"
-  // A gente tenta parsear itens quando fizer sentido.
+function normalizeSentences(sentences) {
+  if (Array.isArray(sentences)) return sentences;
+  if (typeof sentences === "string") return [sentences];
+  return [];
+}
+
+function normalizeCommand(sentence) {
+  if (Array.isArray(sentence)) {
+    return sentence.map((item) => String(item ?? "").trim()).filter(Boolean).join(" ").trim();
+  }
+  return String(sentence ?? "").trim();
+}
+
+function normalizeReplyData(rawReply) {
   try {
-    if (Array.isArray(raw)) {
-      // tenta parseItems por compat
-      return parseItems(raw);
+    if (Array.isArray(rawReply)) {
+      return parseItems(rawReply);
     }
-    if (raw && Array.isArray(raw.data)) return raw.data;
-    return raw;
-  } catch (e) {
-    return raw;
+    if (rawReply && Array.isArray(rawReply.data)) {
+      return rawReply.data;
+    }
+    return rawReply;
+  } catch {
+    return rawReply;
+  }
+}
+
+function findReplyTrap(rawReply) {
+  const rows = Array.isArray(rawReply) ? rawReply : [rawReply];
+
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+
+    const type = String(pick(row, "type", "sentenceType", "event") || "").toLowerCase();
+    const firstSentenceToken = Array.isArray(row.sentence)
+      ? String(row.sentence[0] || "").toLowerCase()
+      : "";
+
+    const isTrap =
+      type.includes("trap") ||
+      type.includes("fatal") ||
+      firstSentenceToken === "!trap" ||
+      firstSentenceToken === "!fatal";
+
+    if (!isTrap) continue;
+
+    const trapMessage =
+      pick(row, "message", "msg", "error", "=message") ||
+      pick(row?.data, "message", "msg", "error", "=message") ||
+      "RouterOS returned trap";
+
+    return {
+      code: type.includes("fatal") || firstSentenceToken === "!fatal"
+        ? "MIKROTIK_FATAL"
+        : "MIKROTIK_TRAP",
+      error: String(trapMessage)
+    };
+  }
+
+  return null;
+}
+
+function normalizeError(error, fallbackCode) {
+  const code = error && error.code ? String(error.code) : fallbackCode;
+  const message = error && error.message ? String(error.message) : String(error || "unknown error");
+  return { code, error: message };
+}
+
+async function safeClose(resource, label, host, port) {
+  if (!resource || typeof resource.close !== "function") return;
+  try {
+    await Promise.resolve(resource.close());
+  } catch (closeError) {
+    logger.warn("mikrotik.close_error", {
+      label,
+      host,
+      port,
+      message: closeError && closeError.message ? closeError.message : String(closeError)
+    });
   }
 }
 
 export async function runMikrotikCommands(mik, sentences) {
-  const cmds = Array.isArray(sentences) ? sentences : (typeof sentences === "string" ? [sentences] : []);
-  if (!cmds.length) return { ok: true, results: [] };
+  const commands = normalizeSentences(sentences)
+    .map((sentence) => normalizeCommand(sentence))
+    .filter(Boolean);
 
-  const { host, user, password, port } = normalizeMik(mik);
+  if (commands.length === 0) {
+    return { ok: true, results: [] };
+  }
 
-  let conn = null;
-  let chan = null;
+  let host = null;
+  let port = null;
+  let connection = null;
+  let channel = null;
+
+  const results = [];
+  let hasErrors = false;
 
   try {
-    // getConnection(host, user, pass, options) -> Promise<Connection>
-    conn = await getConnection(host, user, password, {
-      port,
-      timeout: Number(process.env.MIKROTIK_TIMEOUT_MS || 8000),
+    const cfg = normalizeMikConfig(mik);
+    host = cfg.host;
+    port = cfg.port;
+
+    connection = await getConnection(cfg.host, cfg.user, cfg.pass, {
+      port: cfg.port,
+      timeout: DEFAULT_TIMEOUT_MS
     });
 
-    chan = conn.openChannel();
+    channel = connection.openChannel();
 
-    const results = [];
-    for (const cmd of cmds) {
-      const c = String(cmd || "").trim();
-      if (!c) continue;
+    for (const cmd of commands) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const reply = await channel.write(cmd);
+        const trap = findReplyTrap(reply);
 
-      // chan.write costuma retornar Promise
-      // Em alguns builds ele resolve em "sentences"; em outros, objeto com data.
-      // Vamos só capturar e normalizar.
-      // eslint-disable-next-line no-await-in-loop
-      const raw = await chan.write(c);
-      results.push({ cmd: c, raw, data: normalizeResult(raw) });
+        if (trap) {
+          hasErrors = true;
+          results.push({ cmd, ok: false, error: trap.error, code: trap.code });
+          continue;
+        }
+
+        results.push({
+          cmd,
+          ok: true,
+          reply,
+          data: normalizeReplyData(reply)
+        });
+      } catch (commandError) {
+        hasErrors = true;
+        const normalized = normalizeError(commandError, "MIKROTIK_COMMAND_ERROR");
+        results.push({
+          cmd,
+          ok: false,
+          error: normalized.error,
+          code: normalized.code
+        });
+      }
     }
 
-    try { chan.close && chan.close(); } catch (_) {}
-    try { conn.close && conn.close(); } catch (_) {}
+    return {
+      ok: !hasErrors,
+      results
+    };
+  } catch (connectionError) {
+    const normalized = normalizeError(connectionError, "MIKROTIK_CONNECTION_ERROR");
 
-    return { ok: true, results };
-  } catch (e) {
     logger.error("mikrotik.run_commands.error", {
       host,
       port,
-      code: e?.code,
-      message: e?.message || String(e),
+      code: normalized.code,
+      message: normalized.error
     });
 
-    try { chan && chan.close && chan.close(); } catch (_) {}
-    try { conn && conn.close && conn.close(); } catch (_) {}
+    const errorResults = commands.map((cmd) => ({
+      cmd,
+      ok: false,
+      error: normalized.error,
+      code: normalized.code
+    }));
 
     return {
       ok: false,
-      error: { code: "MIKROTIK_ERROR", message: e?.message || String(e) },
+      results: errorResults,
+      error: {
+        code: normalized.code,
+        message: normalized.error
+      }
     };
+  } finally {
+    await safeClose(channel, "channel", host, port);
+    await safeClose(connection, "connection", host, port);
   }
 }
 
