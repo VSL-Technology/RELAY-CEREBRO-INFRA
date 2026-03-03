@@ -884,7 +884,7 @@ async function handleUploadRedirect(req, res) {
   let path = null;
   let bytes = 0;
   let profileUsed = null;
-  let ensuredHtmlDirectory = true;
+  let ensuredHtmlDirectory;
 
   try {
     const body = req.body || {};
