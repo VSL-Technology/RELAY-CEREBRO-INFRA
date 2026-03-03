@@ -1,10 +1,9 @@
+import "./bootstrap/env.js";
+
 // src/index.js
 import express from "express";
 import morgan from "morgan";
-import "dotenv/config";
 import rateLimit from "express-rate-limit";
-import { execFile as _execFile } from "child_process";
-import { promisify } from "util";
 import {
   authorizeByPedido,
   resyncDevice,
@@ -34,11 +33,10 @@ import identityStore from './services/identityStore.js';
 import routerHealth from './services/routerHealth.js';
 import audit from './services/audit.js';
 import { verifyRelaySignature } from "./security/hmacVerify.js";
-import controlPlaneConfig, { JOB_RUNNER_ENABLED } from "./config/controlPlane.js";
+import { JOB_RUNNER_ENABLED } from "./config/controlPlane.js";
 import { getPrisma } from "./lib/prisma.js";
-
-const startedAt = Date.now();
-const execFile = promisify(_execFile);
+import { ensureDefaultTenant } from "./bootstrap/ensureDefaultTenant.js";
+import healthRoute, { healthLiveRoute, healthReadyRoute } from "./routes/healthRoute.js";
 
 // auth: if RELAY_API_SECRET is set, require HMAC signature on POST/DELETE/SYNC endpoints
 const RELAY_API_SECRET = process.env.RELAY_API_SECRET || null;
@@ -78,6 +76,9 @@ const INTERNAL_WHITELIST = new Set(
 const isStrictSecurity =
   process.env.RELAY_STRICT_SECURITY === "1" ||
   process.env.RELAY_STRICT_SECURITY === "true";
+const MAX_REDIRECT_HTML_BYTES = 32 * 1024;
+const DEFAULT_REDIRECT_PATH = "hotspot4/redirect.html";
+const DEFAULT_HOTSPOT_PROFILE = "hsprof1";
 
 if (!RELAY_TOKEN && !process.env.RELAY_TOKEN_TOOLS && !process.env.RELAY_TOKEN_EXEC) {
   logger.error("missing token configuration: set RELAY_TOKEN or scoped tokens (RELAY_TOKEN_TOOLS/RELAY_TOKEN_EXEC)");
@@ -87,12 +88,7 @@ if (!RELAY_TOKEN && !process.env.RELAY_TOKEN_TOOLS && !process.env.RELAY_TOKEN_E
 function tokenGuard(envName) {
   return (req, res, next) => {
     const expected = process.env[envName];
-    const auth = (req.headers["authorization"] || "").trim();
-    let bearer = null;
-    if (auth.toLowerCase().startsWith("bearer ")) {
-      bearer = auth.slice(7).trim();
-    }
-    const got = bearer || req.headers["x-relay-token"];
+    const got = extractRelayToken(req);
     if (!expected || got !== expected) {
       logger.warn("security.token_guard.denied", {
         envName,
@@ -105,6 +101,22 @@ function tokenGuard(envName) {
   };
 }
 
+function extractRelayToken(req) {
+  const tokenFromHeader = req.headers["x-relay-token"];
+  if (typeof tokenFromHeader === "string" && tokenFromHeader.trim().length > 0) {
+    return tokenFromHeader.trim();
+  }
+
+  const authHeader = typeof req.headers.authorization === "string"
+    ? req.headers.authorization.trim()
+    : "";
+  if (authHeader.startsWith("Bearer ")) {
+    return authHeader.replace("Bearer ", "");
+  }
+
+  return null;
+}
+
 function hmacGuard(req, res, next) {
   const secret = RELAY_API_SECRET;
   if (!secret) return res.status(401).json({ ok: false, code: "HMAC_SECRET_NOT_CONFIGURED" });
@@ -112,11 +124,17 @@ function hmacGuard(req, res, next) {
   const sig = typeof sigRaw === "string" && sigRaw.startsWith("v1=") ? sigRaw.slice(3) : sigRaw;
   const ts = req.headers["x-relay-ts"];
   const nonce = req.headers["x-relay-nonce"];
-  const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.rawBody || "");
-  const pathWithQuery = req.originalUrl || req.url || "";
+  const rawBody = Buffer.isBuffer(req.rawBody)
+    ? req.rawBody
+    : typeof req.rawBody === "string"
+      ? req.rawBody
+      : Buffer.isBuffer(req.body)
+        ? req.body
+        : "";
+  const path = req.path || "";
   const v = verifyRelaySignature({
     method: req.method,
-    pathWithQuery,
+    path,
     rawBody,
     ts,
     nonce,
@@ -125,7 +143,7 @@ function hmacGuard(req, res, next) {
   });
   if (!v.ok) {
     logger.warn("security.hmac.denied", {
-      path: pathWithQuery,
+      path,
       method: req.method,
       code: v.code,
       ip: req.ip
@@ -196,46 +214,15 @@ app.use(express.json({
   },
 }));
 
-async function getDbHealth() {
-  try {
-    const prisma = getPrisma();
-    await prisma.$queryRaw`SELECT 1`;
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
-async function getWireguardInterfaceHealth() {
-  const iface = process.env.WG_INTERFACE || "wg0";
-  const isDryRun = process.env.RELAY_DRY_RUN === "1" || process.env.RELAY_DRY_RUN === "true";
-  if (isDryRun) return { interface: iface, present: true };
-  try {
-    await execFile("wg", ["show", iface]);
-    return { interface: iface, present: true };
-  } catch (_) {
-    return { interface: iface, present: false };
-  }
-}
-
 // Public healthcheck for deploy validation
-app.get("/health", async (req, res) => {
-  const [dbConnected, wg] = await Promise.all([getDbHealth(), getWireguardInterfaceHealth()]);
-  res.status(200).json({
-    status: "ok",
-    controlPlane: {
-      mode: controlPlaneConfig.mode,
-      dbConnected,
-      wgInterface: wg.interface,
-      wgInterfacePresent: wg.present
-    }
-  });
-});
+app.get("/health/live", healthLiveRoute);
+app.get("/health/ready", healthReadyRoute);
+app.get("/health", healthRoute);
 
 // Auth simples por header
 app.use((req, res, next) => {
   if (OPEN_TOKEN_PATHS.has(req.path)) return next();
-  const token = req.headers["x-relay-token"];
+  const token = extractRelayToken(req);
   if (!token || !DEFAULT_ACCESS_TOKEN || token !== DEFAULT_ACCESS_TOKEN) {
     logger.warn("security.default_token.denied", {
       path: req.originalUrl || req.url,
@@ -248,7 +235,7 @@ app.use((req, res, next) => {
 
 function healthTokenGuard(req, res, next) {
   const expected = process.env.RELAY_TOKEN_HEALTH || process.env.RELAY_TOKEN_TOOLS || DEFAULT_ACCESS_TOKEN;
-  const got = req.headers["x-relay-token"];
+  const got = extractRelayToken(req);
   if (!expected || got !== expected) {
     return res.status(401).json({ ok: false, code: "UNAUTHORIZED" });
   }
@@ -257,17 +244,7 @@ function healthTokenGuard(req, res, next) {
 
 // Healthcheck (cheap, no dependencies)
 app.get("/relay/health", healthTokenGuard, (req, res) => {
-  const uptimeMs = Date.now() - startedAt;
-  res.json({
-    ok: true,
-    service: "relay",
-    ts: new Date().toISOString(),
-    uptimeMs,
-    build: {
-      version: process.env.RELAY_BUILD_VERSION || null,
-      sha: process.env.RELAY_BUILD_SHA || null
-    }
-  });
+  res.status(200).json({ status: "ok" });
 });
 
 // Basic identity for backend UI (HMAC-protected)
@@ -329,21 +306,10 @@ app.get("/relay/metrics", async (req, res) => {
 });
 
 // Mikrotik ARP print passthrough
-app.post("/relay/arp-print",
-  tokenGuard("RELAY_TOKEN_TOOLS"),
-  hmacGuard,
-  async (req, res) => {
-    try {
-      const body = req.body || {};
-      const { mikId } = body;
-      if (!mikId) return res.status(400).json({ ok: false, code: 'invalid_payload', message: 'mikId required' });
-      if (!routerHealth.canAttempt(mikId)) return res.status(409).json({ ok: false, code: 'router_circuit_open' });
-      const mik = getMikById(mikId);
-      const cmds = ['/ip/arp/print'];
-      const result = await runMikrotikCommands(mik, cmds);
-      return res.json({ ok: !!result.ok, mikId, result });
-    } catch (e) { return handleError(res, e); }
-  });
+app.post("/relay/arp-print", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, handleArpPrint);
+
+// ARP lookup wrapper for dashboard contract
+app.post("/relay/arp/lookup", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, handleArpLookup);
 
 // Mikrotik ping passthrough
 app.post("/relay/ping",
@@ -363,29 +329,26 @@ app.post("/relay/ping",
   });
 
 // Exec sentences on Mikrotik by mikId (supports multiple commands)
-app.post("/relay/exec-by-device",
-  tokenGuard("RELAY_TOKEN_EXEC"),
-  hmacGuard,
-  async (req, res) => {
-    try {
-      const body = req.body || {};
-      const { mikId, sentences } = body;
-      if (!mikId || !Array.isArray(sentences) || sentences.length === 0) {
-        return res.status(400).json({ ok: false, code: 'invalid_payload', message: 'mikId and sentences[] required' });
-      }
-      if (!routerHealth.canAttempt(mikId)) return res.status(409).json({ ok: false, code: 'router_circuit_open' });
-      const filtered = sentences.filter((s) => typeof s === 'string' && s.trim().length > 0);
-      if (filtered.length === 0) return res.status(400).json({ ok: false, code: 'invalid_payload', message: 'sentences must be non-empty strings' });
-      const mik = getMikById(mikId);
-      const result = await runMikrotikCommands(mik, filtered);
-      return res.json({ ok: !!result.ok, mikId, result });
-    } catch (e) { return handleError(res, e); }
-  });
+app.post("/relay/exec-by-device", tokenGuard("RELAY_TOKEN_EXEC"), hmacGuard, handleExecByDevice);
+app.post("/relay/exec", tokenGuard("RELAY_TOKEN_EXEC"), hmacGuard, handleExecByDevice);
 
-// Placeholder for upload redirect (not implemented)
-app.post("/relay/upload-redirect", hmacGuard, (req, res) => {
-  return res.status(501).json({ ok: false, code: 'not_implemented', message: 'upload-redirect not implemented on relay' });
-});
+// Dashboard hotspot wrappers
+app.post("/relay/hotspot/ensure-user", tokenGuard("RELAY_TOKEN_EXEC"), hmacGuard, handleEnsureHotspotUser);
+app.post("/hotspot/active", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, handleHotspotActive);
+app.get("/hotspot/active", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, (req, res) =>
+  res.status(400).json({
+    ok: false,
+    code: "invalid_method",
+    message: "Use POST /hotspot/active with JSON body { mikId }"
+  })
+);
+app.post("/hotspot/kick", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, (req, res) => handleHotspotKick(req, res));
+app.post("/hotspot/kick/by-ip", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, (req, res) => handleHotspotKick(req, res, { ip: req.body && req.body.ip }));
+app.post("/hotspot/kick/by-mac", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, (req, res) => handleHotspotKick(req, res, { mac: req.body && req.body.mac }));
+app.post("/hotspot/kick/by-user", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, (req, res) => handleHotspotKick(req, res, { user: req.body && req.body.user }));
+
+app.post("/relay/hotspot/upload-redirect", tokenGuard("RELAY_TOKEN_EXEC"), hmacGuard, handleUploadRedirect);
+app.post("/relay/upload-redirect", tokenGuard("RELAY_TOKEN_EXEC"), hmacGuard, handleUploadRedirect);
 
 /**
  * 1) device/hello
@@ -430,6 +393,645 @@ function handleError(res, err) {
   return res.status(500).json({ ok: false, code: 'internal_error', message: 'internal error' });
 }
 
+function extractRowsFromMikrotikResult(result) {
+  if (!result || !Array.isArray(result.results)) return [];
+  const rows = [];
+  for (const item of result.results) {
+    const data = item && item.data;
+    if (Array.isArray(data)) {
+      for (const row of data) {
+        if (row && typeof row === "object") rows.push(row);
+      }
+      continue;
+    }
+    if (data && typeof data === "object") rows.push(data);
+  }
+  return rows;
+}
+
+function pickFirst(value, keys) {
+  for (const key of keys) {
+    if (value && value[key] !== undefined && value[key] !== null) {
+      return value[key];
+    }
+  }
+  return null;
+}
+
+function normalizeIpv4(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(raw)) return null;
+  const octets = raw.split(".").map((o) => Number(o));
+  if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
+  return raw;
+}
+
+function normalizeMacAddress(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const normalized = raw.replace(/-/g, ":").toUpperCase();
+  if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(normalized)) return null;
+  return normalized;
+}
+
+function ensureSafeToken(value, fieldName) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  if (!/^[A-Za-z0-9._:@-]{1,64}$/.test(raw)) {
+    throw new Error(`${fieldName} contains invalid characters`);
+  }
+  return raw;
+}
+
+function getRequestId(req) {
+  const value = req && req.headers ? req.headers["x-request-id"] : null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function escapeRouterOsQuoted(value) {
+  return String(value || "")
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\r\n|\r|\n/g, "\\r\\n");
+}
+
+function validateRedirectHtml(html) {
+  if (typeof html !== "string" || html.length === 0) {
+    return {
+      ok: false,
+      status: 400,
+      code: "invalid_payload",
+      message: "html required"
+    };
+  }
+  if (!html.includes("$(mac)") || !html.includes("$(ip)")) {
+    return {
+      ok: false,
+      status: 400,
+      code: "invalid_payload",
+      message: "html must include $(mac) and $(ip)"
+    };
+  }
+  const bytes = Buffer.byteLength(html, "utf8");
+  if (bytes > MAX_REDIRECT_HTML_BYTES) {
+    return {
+      ok: false,
+      status: 413,
+      code: "payload_too_large",
+      message: `html exceeds ${MAX_REDIRECT_HTML_BYTES} bytes`
+    };
+  }
+  return { ok: true, value: html, bytes };
+}
+
+function validateRedirectPath(pathInput) {
+  if (pathInput !== undefined && typeof pathInput !== "string") {
+    return {
+      ok: false,
+      status: 400,
+      code: "invalid_payload",
+      message: "path must be a string"
+    };
+  }
+
+  const pathValue = String(pathInput || DEFAULT_REDIRECT_PATH).trim() || DEFAULT_REDIRECT_PATH;
+  if (pathValue.includes("..") || pathValue.includes("\\") || /[\u0000-\u001F\u007F]/.test(pathValue)) {
+    return {
+      ok: false,
+      status: 400,
+      code: "invalid_payload",
+      message: "invalid path"
+    };
+  }
+  if (pathValue === DEFAULT_REDIRECT_PATH) {
+    return { ok: true, value: pathValue };
+  }
+  if (!/^hotspot4\/[A-Za-z0-9._-]+\.html$/.test(pathValue)) {
+    return {
+      ok: false,
+      status: 400,
+      code: "invalid_payload",
+      message: "path must be hotspot4/<name>.html"
+    };
+  }
+  return { ok: true, value: pathValue };
+}
+
+function parseEnsureHtmlDirectory(value) {
+  if (value === undefined) return { ok: true, value: true };
+  if (typeof value === "boolean") return { ok: true, value };
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return { ok: true, value: true };
+    if (normalized === "false") return { ok: true, value: false };
+  }
+  return {
+    ok: false,
+    status: 400,
+    code: "invalid_payload",
+    message: "ensureHtmlDirectory must be boolean"
+  };
+}
+
+function resolveProfileName(body) {
+  const candidates = [
+    body && body.hotspotProfile,
+    process.env.RELAY_HOTSPOT_PROFILE_NAME,
+    process.env.RELAY_HOTSPOT_PROFILE,
+    DEFAULT_HOTSPOT_PROFILE
+  ];
+  for (const value of candidates) {
+    const token = ensureSafeToken(value, "hotspotProfile");
+    if (token) return token;
+  }
+  return DEFAULT_HOTSPOT_PROFILE;
+}
+
+function sendUploadRedirectMikrotikError(res, payload) {
+  const {
+    requestId,
+    mikId,
+    path,
+    bytes,
+    operation,
+    result
+  } = payload;
+  logger.error("relay.upload_redirect.mikrotik_error", {
+    requestId,
+    mikId,
+    path,
+    bytes,
+    operation,
+    error: result && result.error ? result.error : null
+  });
+  return res.status(502).json({
+    ok: false,
+    code: "mikrotik_error",
+    message: `${operation} failed`
+  });
+}
+
+async function getFileByName(mik, fileName) {
+  const escapedName = escapeRouterOsQuoted(fileName);
+  const result = await runMikrotikCommands(mik, [`/file print where name="${escapedName}"`]);
+  if (!result.ok) return { ok: false, result };
+
+  const entries = extractRowsFromMikrotikResult(result);
+  const entry = entries.find((row) => String(pickFirst(row, ["name"]) || "").trim() === fileName) || null;
+  if (entry) return { ok: true, entry };
+
+  const fallback = await runMikrotikCommands(mik, ["/file print"]);
+  if (!fallback.ok) return { ok: false, result: fallback };
+  const fallbackEntries = extractRowsFromMikrotikResult(fallback);
+  const fallbackEntry = fallbackEntries.find((row) => String(pickFirst(row, ["name"]) || "").trim() === fileName) || null;
+  return { ok: true, entry: fallbackEntry };
+}
+
+async function ensureHotspotDirectory(mik) {
+  const existing = await getFileByName(mik, "hotspot4");
+  if (!existing.ok) return existing;
+  if (existing.entry) return { ok: true };
+
+  const createResult = await runMikrotikCommands(mik, ["/file make-directory name=hotspot4"]);
+  if (createResult.ok) return { ok: true };
+
+  const recheck = await getFileByName(mik, "hotspot4");
+  if (recheck.ok && recheck.entry) return { ok: true };
+  return { ok: false, result: createResult };
+}
+
+async function removeFileIfExists(mik, fileName) {
+  const lookup = await getFileByName(mik, fileName);
+  if (!lookup.ok) return lookup;
+  if (!lookup.entry) return { ok: true, removed: false };
+
+  const fileId = String(pickFirst(lookup.entry, [".id", "id"]) || "").trim();
+  const escapedName = escapeRouterOsQuoted(fileName);
+  const command = fileId
+    ? `/file remove ${fileId}`
+    : `/file remove [find name="${escapedName}"]`;
+  const removeResult = await runMikrotikCommands(mik, [command]);
+  if (!removeResult.ok) return { ok: false, result: removeResult };
+  return { ok: true, removed: true };
+}
+
+async function ensureHotspotProfileHtmlDirectory(mik, profileName) {
+  const escapedProfile = escapeRouterOsQuoted(profileName);
+  const checkResult = await runMikrotikCommands(
+    mik,
+    [`/ip hotspot profile print where name="${escapedProfile}"`]
+  );
+  if (!checkResult.ok) return { ok: false, code: "mikrotik_error", result: checkResult };
+
+  const profiles = extractRowsFromMikrotikResult(checkResult);
+  if (profiles.length === 0) return { ok: false, code: "profile_not_found" };
+
+  const setResult = await runMikrotikCommands(
+    mik,
+    [`/ip hotspot profile set [find name="${escapedProfile}"] html-directory=hotspot4 html-directory-override=""`]
+  );
+  if (!setResult.ok) return { ok: false, code: "mikrotik_error", result: setResult };
+  return { ok: true };
+}
+
+function normalizeArpEntry(row) {
+  return {
+    address: String(pickFirst(row, ["address", "ip"]) || "").trim() || null,
+    macAddress: normalizeMacAddress(pickFirst(row, ["mac-address", "mac", "macAddress"])),
+    interface: String(pickFirst(row, ["interface"]) || "").trim() || null,
+    dynamic: String(pickFirst(row, ["dynamic"]) || "").trim() || null,
+    complete: String(pickFirst(row, ["complete"]) || "").trim() || null,
+    comment: String(pickFirst(row, ["comment"]) || "").trim() || null
+  };
+}
+
+function normalizeHotspotActiveEntry(row) {
+  return {
+    id: String(pickFirst(row, [".id", "id"]) || "").trim() || null,
+    user: String(pickFirst(row, ["user", "name"]) || "").trim() || null,
+    ip: String(pickFirst(row, ["address", "ip"]) || "").trim() || null,
+    mac: normalizeMacAddress(pickFirst(row, ["mac-address", "mac", "macAddress"])),
+    uptime: String(pickFirst(row, ["uptime"]) || "").trim() || null,
+    server: String(pickFirst(row, ["server"]) || "").trim() || null
+  };
+}
+
+function assertMikrotikEligible(mikId, res) {
+  if (!mikId) {
+    res.status(400).json({ ok: false, code: "invalid_payload", message: "mikId required" });
+    return false;
+  }
+  if (!routerHealth.canAttempt(mikId)) {
+    res.status(409).json({ ok: false, code: "router_circuit_open" });
+    return false;
+  }
+  return true;
+}
+
+async function runArpPrint(mikId) {
+  const mik = getMikById(mikId);
+  return runMikrotikCommands(mik, ["/ip/arp/print"]);
+}
+
+async function runHotspotActivePrint(mikId) {
+  const mik = getMikById(mikId);
+  return runMikrotikCommands(mik, ["/ip hotspot active print"]);
+}
+
+function matchesHotspotCriteria(entry, criteria) {
+  if (criteria.ip && entry.ip !== criteria.ip) return false;
+  if (criteria.mac && entry.mac !== criteria.mac) return false;
+  if (criteria.user && entry.user !== criteria.user) return false;
+  return true;
+}
+
+function buildHotspotKickCommands(criteria) {
+  const commands = [];
+  if (criteria.ip) {
+    commands.push(`/ip hotspot active remove [find address=${criteria.ip}]`);
+    commands.push(`/ip hotspot host remove [find address=${criteria.ip}]`);
+    commands.push(`/ip hotspot cookie remove [find address=${criteria.ip}]`);
+  }
+  if (criteria.mac) {
+    commands.push(`/ip hotspot active remove [find mac-address=${criteria.mac}]`);
+    commands.push(`/ip hotspot host remove [find mac-address=${criteria.mac}]`);
+    commands.push(`/ip hotspot cookie remove [find mac-address=${criteria.mac}]`);
+  }
+  if (criteria.user) {
+    commands.push(`/ip hotspot active remove [find user=${criteria.user}]`);
+    commands.push(`/ip hotspot cookie remove [find user=${criteria.user}]`);
+  }
+  return [...new Set(commands)];
+}
+
+async function handleExecByDevice(req, res) {
+  try {
+    const body = req.body || {};
+    const { mikId, sentences } = body;
+    if (!mikId || !Array.isArray(sentences) || sentences.length === 0) {
+      return res.status(400).json({ ok: false, code: "invalid_payload", message: "mikId and sentences[] required" });
+    }
+    if (!routerHealth.canAttempt(mikId)) return res.status(409).json({ ok: false, code: "router_circuit_open" });
+    const filtered = sentences.filter((s) => typeof s === "string" && s.trim().length > 0);
+    if (filtered.length === 0) {
+      return res.status(400).json({ ok: false, code: "invalid_payload", message: "sentences must be non-empty strings" });
+    }
+    const mik = getMikById(mikId);
+    const result = await runMikrotikCommands(mik, filtered);
+    return res.json({ ok: !!result.ok, mikId, result });
+  } catch (e) {
+    return handleError(res, e);
+  }
+}
+
+async function handleArpPrint(req, res) {
+  try {
+    const body = req.body || {};
+    const { mikId } = body;
+    if (!assertMikrotikEligible(mikId, res)) return;
+    const result = await runArpPrint(mikId);
+    return res.json({ ok: !!result.ok, mikId, result });
+  } catch (e) {
+    return handleError(res, e);
+  }
+}
+
+async function handleArpLookup(req, res) {
+  try {
+    const body = req.body || {};
+    const { mikId } = body;
+    const ip = body.ip ? normalizeIpv4(body.ip) : null;
+    const mac = body.mac ? normalizeMacAddress(body.mac) : null;
+    if (!assertMikrotikEligible(mikId, res)) return;
+    if (body.ip && !ip) {
+      return res.status(400).json({ ok: false, code: "invalid_payload", message: "invalid ip format" });
+    }
+    if (body.mac && !mac) {
+      return res.status(400).json({ ok: false, code: "invalid_payload", message: "invalid mac format" });
+    }
+    if (!ip && !mac) {
+      return res.status(400).json({ ok: false, code: "invalid_payload", message: "ip or mac required" });
+    }
+
+    const result = await runArpPrint(mikId);
+    const entries = extractRowsFromMikrotikResult(result).map(normalizeArpEntry);
+    const entry = entries.find((item) => {
+      if (ip && item.address !== ip) return false;
+      if (mac && item.macAddress !== mac) return false;
+      return true;
+    }) || null;
+
+    return res.json({
+      ok: true,
+      mikId,
+      found: !!entry,
+      entry
+    });
+  } catch (e) {
+    return handleError(res, e);
+  }
+}
+
+async function handleEnsureHotspotUser(req, res) {
+  try {
+    const body = req.body || {};
+    const { mikId } = body;
+    if (!assertMikrotikEligible(mikId, res)) return;
+
+    const username = body.username
+      ? ensureSafeToken(body.username, "username")
+      : `relay-${Date.now().toString(36)}`;
+    const password = body.password
+      ? ensureSafeToken(body.password, "password")
+      : username;
+    const profile = body.profile
+      ? ensureSafeToken(body.profile, "profile")
+      : (process.env.RELAY_HOTSPOT_PROFILE || "default");
+
+    const mik = getMikById(mikId);
+    const checkResult = await runMikrotikCommands(mik, [`/ip hotspot user print where name=${username}`]);
+    const existing = extractRowsFromMikrotikResult(checkResult).length > 0;
+    const command = existing
+      ? `/ip hotspot user set [find name=${username}] password=${password} profile=${profile}`
+      : `/ip hotspot user add name=${username} password=${password} profile=${profile}`;
+    const writeResult = await runMikrotikCommands(mik, [command]);
+
+    return res.json({
+      ok: !!writeResult.ok,
+      mikId,
+      user: { username, profile },
+      created: !existing
+    });
+  } catch (e) {
+    if (e && /invalid characters/i.test(e.message || "")) {
+      return res.status(400).json({ ok: false, code: "invalid_payload", message: e.message });
+    }
+    return handleError(res, e);
+  }
+}
+
+async function handleHotspotActive(req, res) {
+  try {
+    const body = req.body || {};
+    const mikId = String(body.mikId || req.query.mikId || "").trim();
+    if (!assertMikrotikEligible(mikId, res)) return;
+    const result = await runHotspotActivePrint(mikId);
+    const active = extractRowsFromMikrotikResult(result).map(normalizeHotspotActiveEntry);
+    return res.json({ ok: !!result.ok, mikId, active });
+  } catch (e) {
+    return handleError(res, e);
+  }
+}
+
+async function handleHotspotKick(req, res, forcedCriteria = null) {
+  try {
+    const body = req.body || {};
+    const mikId = String(body.mikId || "").trim();
+    if (!assertMikrotikEligible(mikId, res)) return;
+
+    const inputIp = forcedCriteria && forcedCriteria.ip !== undefined ? forcedCriteria.ip : body.ip;
+    const inputMac = forcedCriteria && forcedCriteria.mac !== undefined ? forcedCriteria.mac : body.mac;
+    const inputUser = forcedCriteria && forcedCriteria.user !== undefined ? forcedCriteria.user : body.user;
+
+    const ip = inputIp ? normalizeIpv4(inputIp) : null;
+    const mac = inputMac ? normalizeMacAddress(inputMac) : null;
+    const user = inputUser ? ensureSafeToken(inputUser, "user") : null;
+
+    if (inputIp && !ip) {
+      return res.status(400).json({ ok: false, code: "invalid_payload", message: "invalid ip format" });
+    }
+    if (inputMac && !mac) {
+      return res.status(400).json({ ok: false, code: "invalid_payload", message: "invalid mac format" });
+    }
+    if (inputUser && !user) {
+      return res.status(400).json({ ok: false, code: "invalid_payload", message: "invalid user format" });
+    }
+    if (!ip && !mac && !user) {
+      return res.status(400).json({ ok: false, code: "invalid_payload", message: "ip, mac or user required" });
+    }
+
+    const criteria = { ip, mac, user };
+    const activeResult = await runHotspotActivePrint(mikId);
+    const active = extractRowsFromMikrotikResult(activeResult).map(normalizeHotspotActiveEntry);
+    const matched = active.filter((entry) => matchesHotspotCriteria(entry, criteria));
+
+    const commands = buildHotspotKickCommands(criteria);
+    const mik = getMikById(mikId);
+    const removeResult = commands.length > 0
+      ? await runMikrotikCommands(mik, commands)
+      : { ok: true, results: [] };
+
+    return res.json({
+      ok: !!removeResult.ok,
+      mikId,
+      kicked: matched.length,
+      criteria
+    });
+  } catch (e) {
+    if (e && /invalid characters/i.test(e.message || "")) {
+      return res.status(400).json({ ok: false, code: "invalid_payload", message: e.message });
+    }
+    return handleError(res, e);
+  }
+}
+
+async function handleUploadRedirect(req, res) {
+  const requestId = getRequestId(req);
+  let mikId = null;
+  let path = null;
+  let bytes = 0;
+  let profileUsed = null;
+  let ensuredHtmlDirectory = true;
+
+  try {
+    const body = req.body || {};
+    mikId = String(body.mikId || "").trim();
+    if (!assertMikrotikEligible(mikId, res)) return;
+
+    const htmlValidation = validateRedirectHtml(body.html);
+    if (!htmlValidation.ok) {
+      return res.status(htmlValidation.status).json({
+        ok: false,
+        code: htmlValidation.code,
+        message: htmlValidation.message
+      });
+    }
+
+    const pathValidation = validateRedirectPath(body.path);
+    if (!pathValidation.ok) {
+      return res.status(pathValidation.status).json({
+        ok: false,
+        code: pathValidation.code,
+        message: pathValidation.message
+      });
+    }
+
+    const ensureValidation = parseEnsureHtmlDirectory(body.ensureHtmlDirectory);
+    if (!ensureValidation.ok) {
+      return res.status(ensureValidation.status).json({
+        ok: false,
+        code: ensureValidation.code,
+        message: ensureValidation.message
+      });
+    }
+
+    const html = htmlValidation.value;
+    bytes = htmlValidation.bytes;
+    path = pathValidation.value;
+    ensuredHtmlDirectory = ensureValidation.value;
+    profileUsed = ensuredHtmlDirectory ? resolveProfileName(body) : null;
+
+    const mik = getMikById(mikId);
+
+    if (ensuredHtmlDirectory) {
+      const profileResult = await ensureHotspotProfileHtmlDirectory(mik, profileUsed);
+      if (!profileResult.ok) {
+        if (profileResult.code === "profile_not_found") {
+          logger.warn("relay.upload_redirect.profile_not_found", {
+            requestId,
+            mikId,
+            path,
+            bytes,
+            profileUsed
+          });
+          return res.status(404).json({
+            ok: false,
+            code: "profile_not_found",
+            message: `hotspot profile not found: ${profileUsed}`
+          });
+        }
+        return sendUploadRedirectMikrotikError(res, {
+          requestId,
+          mikId,
+          path,
+          bytes,
+          operation: "set_hotspot_profile_html_directory",
+          result: profileResult.result
+        });
+      }
+    }
+
+    const ensureDirResult = await ensureHotspotDirectory(mik);
+    if (!ensureDirResult.ok) {
+      return sendUploadRedirectMikrotikError(res, {
+        requestId,
+        mikId,
+        path,
+        bytes,
+        operation: "ensure_hotspot4_directory",
+        result: ensureDirResult.result
+      });
+    }
+
+    const removeResult = await removeFileIfExists(mik, path);
+    if (!removeResult.ok) {
+      return sendUploadRedirectMikrotikError(res, {
+        requestId,
+        mikId,
+        path,
+        bytes,
+        operation: "remove_existing_redirect_file",
+        result: removeResult.result
+      });
+    }
+
+    const escapedPath = escapeRouterOsQuoted(path);
+    const escapedHtml = escapeRouterOsQuoted(html);
+    const addResult = await runMikrotikCommands(
+      mik,
+      [`/file add name="${escapedPath}" contents="${escapedHtml}"`]
+    );
+    if (!addResult.ok) {
+      return sendUploadRedirectMikrotikError(res, {
+        requestId,
+        mikId,
+        path,
+        bytes,
+        operation: "upload_redirect_file",
+        result: addResult
+      });
+    }
+
+    logger.info("relay.upload_redirect.success", {
+      requestId,
+      mikId,
+      path,
+      bytes,
+      ensuredHtmlDirectory,
+      profileUsed
+    });
+
+    return res.status(200).json({
+      ok: true,
+      mikId,
+      path,
+      bytes,
+      ensuredHtmlDirectory,
+      profileUsed
+    });
+  } catch (e) {
+    if (e && /invalid characters/i.test(e.message || "")) {
+      return res.status(400).json({
+        ok: false,
+        code: "invalid_payload",
+        message: e.message
+      });
+    }
+
+    logger.error("relay.upload_redirect.error", {
+      requestId,
+      mikId,
+      path,
+      bytes,
+      message: e && e.message
+    });
+    return handleError(res, e);
+  }
+}
+
 // Devices API (provision/deprovision/sync/status)
 app.post('/devices', hmacGuard, async (req, res) => {
   try {
@@ -458,7 +1060,7 @@ app.post('/devices/:id/sync', hmacGuard, async (req, res) => {
 app.get('/devices/:id/status', async (req, res) => {
   try {
     // GETs can use token auth only
-    const token = req.headers['x-relay-token'];
+    const token = extractRelayToken(req);
     if (!token || !DEFAULT_ACCESS_TOKEN || token !== DEFAULT_ACCESS_TOKEN) {
       return res.status(401).json({ ok: false, code: 'unauthorized' });
     }
@@ -952,8 +1554,20 @@ app.post('/internal/mikrotik/probe', requireInternalAccess, async (req, res) => 
   }
 });
 
-app.listen(PORT, process.env.BIND_HOST || "127.0.0.1", () => {
+app.listen(PORT, process.env.BIND_HOST || "127.0.0.1", async () => {
   logger.info('relay.online', { port: PORT, host: process.env.BIND_HOST || "127.0.0.1" });
+  try {
+    getPrisma();
+    const tenant = await ensureDefaultTenant();
+    if (tenant) {
+      logger.info("tenant.default_ready", { id: tenant.id, slug: tenant.slug });
+    } else {
+      logger.warn("tenant.default_unavailable");
+    }
+  } catch (e) {
+    logger.error("tenant.default_bootstrap_failed", { message: e && e.message });
+  }
+
   // Start background event consumer and job runner
   try {
     const consumer = new EventConsumer();
