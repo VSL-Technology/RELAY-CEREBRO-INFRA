@@ -76,9 +76,10 @@ const INTERNAL_WHITELIST = new Set(
 const isStrictSecurity =
   process.env.RELAY_STRICT_SECURITY === "1" ||
   process.env.RELAY_STRICT_SECURITY === "true";
-const MAX_REDIRECT_HTML_BYTES = 32 * 1024;
+const MAX_REDIRECT_HTML_BYTES = 16 * 1024;
 const DEFAULT_REDIRECT_PATH = "hotspot4/redirect.html";
-const DEFAULT_HOTSPOT_PROFILE = "hsprof1";
+const DEFAULT_HOTSPOT_PROFILE =
+  process.env.RELAY_DEFAULT_HOTSPOT_PROFILE || "hsprof1";
 
 if (!RELAY_TOKEN && !process.env.RELAY_TOKEN_TOOLS && !process.env.RELAY_TOKEN_EXEC) {
   logger.error("missing token configuration: set RELAY_TOKEN or scoped tokens (RELAY_TOKEN_TOOLS/RELAY_TOKEN_EXEC)");
@@ -475,6 +476,14 @@ function validateRedirectHtml(html) {
       message: "html must include $(mac) and $(ip)"
     };
   }
+  if (/<script\b[^>]*\bsrc\s*=\s*["']https?:\/\//i.test(html)) {
+    return {
+      ok: false,
+      status: 400,
+      code: "invalid_payload",
+      message: "external script references are not allowed"
+    };
+  }
   const bytes = Buffer.byteLength(html, "utf8");
   if (bytes > MAX_REDIRECT_HTML_BYTES) {
     return {
@@ -679,6 +688,39 @@ async function runArpPrint(mikId) {
 async function runHotspotActivePrint(mikId) {
   const mik = getMikById(mikId);
   return runMikrotikCommands(mik, ["/ip hotspot active print"]);
+}
+
+async function validateSingleActiveHotspot(mik) {
+  const result = await runMikrotikCommands(mik, ["/ip hotspot print"]);
+  if (!result.ok) return { ok: false, code: "mikrotik_error", result };
+
+  const hotspots = extractRowsFromMikrotikResult(result);
+  const activeHotspots = hotspots.filter((row) => {
+    const rawDisabled = pickFirst(row, ["disabled"]);
+    if (rawDisabled === true) return false;
+    const normalized = String(rawDisabled === undefined || rawDisabled === null ? "" : rawDisabled)
+      .trim()
+      .toLowerCase();
+    return !(normalized === "true" || normalized === "yes" || normalized === "1");
+  });
+
+  if (activeHotspots.length > 1) {
+    return {
+      ok: false,
+      code: "multiple_hotspots_active",
+      message: "more than one hotspot server is enabled"
+    };
+  }
+
+  const activeHotspot = activeHotspots[0] || null;
+  const activeProfile = activeHotspot
+    ? String(pickFirst(activeHotspot, ["profile"]) || "").trim() || null
+    : null;
+
+  return {
+    ok: true,
+    activeProfile
+  };
 }
 
 function matchesHotspotCriteria(entry, criteria) {
@@ -925,6 +967,35 @@ async function handleUploadRedirect(req, res) {
     profileUsed = ensuredHtmlDirectory ? resolveProfileName(body) : null;
 
     const mik = getMikById(mikId);
+    const hotspotValidation = await validateSingleActiveHotspot(mik);
+    if (!hotspotValidation.ok) {
+      if (hotspotValidation.code === "multiple_hotspots_active") {
+        return res.status(409).json({
+          ok: false,
+          code: "multiple_hotspots_active",
+          message: "more than one hotspot server is enabled"
+        });
+      }
+      return sendUploadRedirectMikrotikError(res, {
+        requestId,
+        mikId,
+        path,
+        bytes,
+        operation: "validate_single_active_hotspot",
+        result: hotspotValidation.result
+      });
+    }
+
+    if (profileUsed && hotspotValidation.activeProfile && hotspotValidation.activeProfile !== profileUsed) {
+      logger.warn("relay.upload_redirect.profile_mismatch", {
+        requestId,
+        mikId,
+        path,
+        bytes,
+        activeProfile: hotspotValidation.activeProfile,
+        profileUsed
+      });
+    }
 
     if (ensuredHtmlDirectory) {
       const profileResult = await ensureHotspotProfileHtmlDirectory(mik, profileUsed);
