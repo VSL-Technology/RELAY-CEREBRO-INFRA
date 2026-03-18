@@ -63,13 +63,9 @@ if (dotenvResult.error) {
 }
 bootInfo("dotenv ok");
 
-if (!process.env.HMAC_SECRET && process.env.RELAY_API_SECRET) {
-  process.env.HMAC_SECRET = process.env.RELAY_API_SECRET;
-}
-
 const requiredEnv = [
   "DATABASE_URL",
-  "HMAC_SECRET",
+  "RELAY_API_SECRET",
   "WG_PRIVATE_KEY",
   "WG_INTERFACE",
   "NODE_ENV"
@@ -84,6 +80,9 @@ for (const key of requiredEnv) {
 
 bootInfo("env ok");
 bootInfo(`DATABASE_URL: ${maskDatabaseUrl(process.env.DATABASE_URL)}`);
+
+// Backward compatibility for modules that still read HMAC_SECRET.
+process.env.HMAC_SECRET = process.env.RELAY_API_SECRET;
 
 const relayEnvJson = parseOptionalJsonEnv("RELAY_ENV_JSON");
 const appEnvJson = parseOptionalJsonEnv("APP_ENV_JSON");
