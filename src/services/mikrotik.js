@@ -56,9 +56,11 @@ function normalizeSentences(sentences) {
 
 function normalizeCommand(sentence) {
   if (Array.isArray(sentence)) {
-    return sentence.map((item) => String(item ?? "").trim()).filter(Boolean).join(" ").trim();
+    const parts = sentence.map((item) => String(item ?? "").trim()).filter(Boolean);
+    return parts.length > 0 ? parts : null;
   }
-  return String(sentence ?? "").trim();
+  const normalized = String(sentence ?? "").trim();
+  return normalized || null;
 }
 
 function normalizeReplyData(rawReply) {
@@ -160,6 +162,7 @@ export async function runMikrotikCommands(mik, sentences) {
     channel = connection.openChannel();
 
     for (const cmd of commands) {
+      const cmdLabel = Array.isArray(cmd) ? cmd.join(" ") : cmd;
       try {
         // eslint-disable-next-line no-await-in-loop
         const reply = await channel.write(cmd);
@@ -167,12 +170,12 @@ export async function runMikrotikCommands(mik, sentences) {
 
         if (trap) {
           hasErrors = true;
-          results.push({ cmd, ok: false, error: trap.error, code: trap.code });
+          results.push({ cmd: cmdLabel, ok: false, error: trap.error, code: trap.code });
           continue;
         }
 
         results.push({
-          cmd,
+          cmd: cmdLabel,
           ok: true,
           reply,
           data: normalizeReplyData(reply)
@@ -181,7 +184,7 @@ export async function runMikrotikCommands(mik, sentences) {
         hasErrors = true;
         const normalized = normalizeError(commandError, "MIKROTIK_COMMAND_ERROR");
         results.push({
-          cmd,
+          cmd: cmdLabel,
           ok: false,
           error: normalized.error,
           code: normalized.code
@@ -204,7 +207,7 @@ export async function runMikrotikCommands(mik, sentences) {
     });
 
     const errorResults = commands.map((cmd) => ({
-      cmd,
+      cmd: Array.isArray(cmd) ? cmd.join(" ") : cmd,
       ok: false,
       error: normalized.error,
       code: normalized.code

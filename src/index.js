@@ -1,6 +1,7 @@
 import "./bootstrap/env.js";
 
 // src/index.js
+import crypto from "crypto";
 import express from "express";
 import morgan from "morgan";
 import rateLimit from "express-rate-limit";
@@ -32,17 +33,14 @@ import identityService from './services/identityService.js';
 import identityStore from './services/identityStore.js';
 import routerHealth from './services/routerHealth.js';
 import audit from './services/audit.js';
-import { verifyRelaySignature } from "./security/hmacVerify.js";
 import { JOB_RUNNER_ENABLED } from "./config/controlPlane.js";
 import { getPrisma } from "./lib/prisma.js";
 import { ensureDefaultTenant } from "./bootstrap/ensureDefaultTenant.js";
 import healthRoute, { healthLiveRoute, healthReadyRoute } from "./routes/healthRoute.js";
 
-// auth: if RELAY_API_SECRET is set, require HMAC signature on POST/DELETE/SYNC endpoints
 const RELAY_API_SECRET = process.env.RELAY_API_SECRET || null;
-const isProd = process.env.NODE_ENV === 'production';
-if (isProd && !RELAY_API_SECRET) {
-  throw new Error("MISCONFIG: RELAY_API_SECRET is required in production");
+if (!RELAY_API_SECRET) {
+  throw new Error("RELAY_API_SECRET missing");
 }
 
 // basic rate limiter (express-rate-limit)
@@ -56,58 +54,21 @@ const limiter = rateLimit({
 });
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 const RELAY_TOKEN = process.env.RELAY_TOKEN;
-const DEFAULT_ACCESS_TOKEN =
-  RELAY_TOKEN || process.env.RELAY_TOKEN_TOOLS || process.env.RELAY_TOKEN_EXEC || null;
-const OPEN_TOKEN_PATHS = new Set([
-  '/relay/health',
-  '/relay/arp-print',
-  '/relay/ping',
-  '/relay/exec-by-device',
-  '/api/webhooks/pagarme'
-]);
-const INTERNAL_WHITELIST = new Set(
-  (process.env.RELAY_INTERNAL_WHITELIST || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-);
 const isStrictSecurity =
   process.env.RELAY_STRICT_SECURITY === "1" ||
   process.env.RELAY_STRICT_SECURITY === "true";
 const MAX_REDIRECT_HTML_BYTES = 16 * 1024;
 const DEFAULT_REDIRECT_PATH = "hotspot4/redirect.html";
-const DEFAULT_HOTSPOT_PROFILE =
-  process.env.RELAY_DEFAULT_HOTSPOT_PROFILE || "hsprof1";
+const DEFAULT_HOTSPOT_PROFILE = process.env.RELAY_DEFAULT_HOTSPOT_PROFILE || "hsprof1";
 
-if (!RELAY_TOKEN && !process.env.RELAY_TOKEN_TOOLS && !process.env.RELAY_TOKEN_EXEC) {
-  logger.error("missing token configuration: set RELAY_TOKEN or scoped tokens (RELAY_TOKEN_TOOLS/RELAY_TOKEN_EXEC)");
+if (!RELAY_TOKEN) {
+  logger.error("missing token configuration: set RELAY_TOKEN");
   process.exit(1);
 }
 
-function tokenGuard(envName) {
-  return (req, res, next) => {
-    const expected = process.env[envName];
-    const got = extractRelayToken(req);
-    if (!expected || got !== expected) {
-      logger.warn("security.token_guard.denied", {
-        envName,
-        path: req.originalUrl || req.url,
-        ip: req.ip
-      });
-      return res.status(401).json({ ok: false, code: "UNAUTHORIZED" });
-    }
-    next();
-  };
-}
-
 function extractRelayToken(req) {
-  const tokenFromHeader = req.headers["x-relay-token"];
-  if (typeof tokenFromHeader === "string" && tokenFromHeader.trim().length > 0) {
-    return tokenFromHeader.trim();
-  }
-
   const authHeader = typeof req.headers.authorization === "string"
     ? req.headers.authorization.trim()
     : "";
@@ -118,42 +79,6 @@ function extractRelayToken(req) {
   return null;
 }
 
-function hmacGuard(req, res, next) {
-  const secret = RELAY_API_SECRET;
-  if (!secret) return res.status(401).json({ ok: false, code: "HMAC_SECRET_NOT_CONFIGURED" });
-  const sigRaw = req.headers["x-relay-signature"];
-  const sig = typeof sigRaw === "string" && sigRaw.startsWith("v1=") ? sigRaw.slice(3) : sigRaw;
-  const ts = req.headers["x-relay-ts"];
-  const nonce = req.headers["x-relay-nonce"];
-  const rawBody = Buffer.isBuffer(req.rawBody)
-    ? req.rawBody
-    : typeof req.rawBody === "string"
-      ? req.rawBody
-      : Buffer.isBuffer(req.body)
-        ? req.body
-        : "";
-  const path = req.path || "";
-  const v = verifyRelaySignature({
-    method: req.method,
-    path,
-    rawBody,
-    ts,
-    nonce,
-    signatureHex: typeof sig === "string" ? sig : "",
-    secret,
-  });
-  if (!v.ok) {
-    logger.warn("security.hmac.denied", {
-      path,
-      method: req.method,
-      code: v.code,
-      ip: req.ip
-    });
-    return res.status(401).json({ ok: false, code: v.code });
-  }
-  next();
-}
-
 const RETRY_NOW_COOLDOWN_MS = Number(process.env.RELAY_RETRY_NOW_COOLDOWN_MS || 30000);
 const lastRetryNowBySid = new Map();
 if (isStrictSecurity) {
@@ -161,13 +86,10 @@ if (isStrictSecurity) {
     logger.error('missing RELAY_API_SECRET while RELAY_STRICT_SECURITY enabled');
     process.exit(1);
   }
-  if (!process.env.RELAY_INTERNAL_TOKEN) {
-    logger.error('missing RELAY_INTERNAL_TOKEN while RELAY_STRICT_SECURITY enabled');
+  if (!process.env.RELAY_TOKEN) {
+    logger.error('missing RELAY_TOKEN while RELAY_STRICT_SECURITY enabled');
     process.exit(1);
   }
-}
-if (!process.env.RELAY_INTERNAL_TOKEN) {
-  logger.warn('warning: RELAY_INTERNAL_TOKEN not set; internal endpoints may be exposed');
 }
 
 function normalizeClientIp(ip) {
@@ -176,29 +98,77 @@ function normalizeClientIp(ip) {
   return raw;
 }
 
-function requireInternalAccess(req, res, next) {
-  const internalToken = process.env.RELAY_INTERNAL_TOKEN;
-  if (!internalToken) {
-    logger.error("security.internal.denied", {
-      reason: "internal_token_not_configured",
-      path: req.originalUrl || req.url
-    });
-    return res.status(403).json({ ok: false, code: "internal_token_not_configured" });
+function verifyHmac(req) {
+  const secret = process.env.RELAY_API_SECRET;
+  if (!secret) {
+    throw new Error("HMAC_SECRET_NOT_CONFIGURED");
   }
 
-  const provided = req.headers["x-relay-internal-token"];
-  const ip = normalizeClientIp(req.ip);
-  if (provided === internalToken || (INTERNAL_WHITELIST.size > 0 && INTERNAL_WHITELIST.has(ip))) {
-    return next();
+  const ts = req.headers["x-relay-ts"];
+  const nonce = req.headers["x-relay-nonce"];
+  const signatureHeader = req.headers["x-relay-signature"];
+  const signature = typeof signatureHeader === "string" && signatureHeader.startsWith("v1=")
+    ? signatureHeader.slice(3)
+    : signatureHeader;
+
+  if (!ts || !nonce || !signature) {
+    throw new Error("HMAC_MISSING");
   }
 
-  logger.warn("security.internal.denied", {
-    reason: "forbidden",
-    path: req.originalUrl || req.url,
-    ip
-  });
-  return res.status(403).json({ ok: false, code: "forbidden" });
+  const now = Date.now();
+  if (Math.abs(now - Number(ts)) > 30000) {
+    throw new Error("HMAC_TS_OUT_OF_RANGE");
+  }
+
+  const body = req.body ? JSON.stringify(req.body) : "";
+  const base = `${req.method}\n${req.path}\n${ts}\n${nonce}\n${body}`;
+
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(base)
+    .digest("hex");
+
+  if (!/^[a-f0-9]+$/i.test(String(signature))) {
+    throw new Error("HMAC_SIGNATURE_INVALID");
+  }
+
+  const expectedBuf = Buffer.from(expected, "hex");
+  const providedBuf = Buffer.from(String(signature), "hex");
+  if (expectedBuf.length !== providedBuf.length || !crypto.timingSafeEqual(expectedBuf, providedBuf)) {
+    throw new Error("HMAC_SIGNATURE_INVALID");
+  }
 }
+
+function authMiddleware(req, res, next) {
+  const provided = extractRelayToken(req);
+  const ip = normalizeClientIp(req.ip);
+  if (provided !== RELAY_TOKEN) {
+    logger.warn("security.auth.denied", {
+      reason: "unauthorized",
+      path: req.originalUrl || req.url,
+      ip
+    });
+    return res.status(401).json({ ok: false, code: "UNAUTHORIZED" });
+  }
+
+  try {
+    verifyHmac(req);
+  } catch (err) {
+    logger.warn("security.hmac.denied", {
+      path: req.originalUrl || req.url,
+      method: req.method,
+      ip,
+      code: err && err.message ? err.message : "HMAC_INVALID"
+    });
+    return res.status(401).json({
+      ok: false,
+      code: err.message
+    });
+  }
+
+  next();
+}
+
 
 // Keep morgan for access logs, but keep minimal formatting to avoid double-logging
 app.use(morgan("combined"));
@@ -220,46 +190,37 @@ app.get("/health/live", healthLiveRoute);
 app.get("/health/ready", healthReadyRoute);
 app.get("/health", healthRoute);
 
-// Auth simples por header
 app.use((req, res, next) => {
-  if (OPEN_TOKEN_PATHS.has(req.path)) return next();
-  const token = extractRelayToken(req);
-  if (!token || !DEFAULT_ACCESS_TOKEN || token !== DEFAULT_ACCESS_TOKEN) {
-    logger.warn("security.default_token.denied", {
-      path: req.originalUrl || req.url,
-      ip: req.ip
-    });
-    return res.status(401).json({ error: "Unauthorized relay token" });
+  if (req.path.startsWith("/relay") || req.path.startsWith("/internal")) {
+    return authMiddleware(req, res, next);
   }
   next();
 });
 
-function healthTokenGuard(req, res, next) {
-  const expected = process.env.RELAY_TOKEN_HEALTH || process.env.RELAY_TOKEN_TOOLS || DEFAULT_ACCESS_TOKEN;
-  const got = extractRelayToken(req);
-  if (!expected || got !== expected) {
-    return res.status(401).json({ ok: false, code: "UNAUTHORIZED" });
-  }
-  next();
-}
-
 // Healthcheck (cheap, no dependencies)
-app.get("/relay/health", healthTokenGuard, (req, res) => {
+app.get("/relay/health", (req, res) => {
   res.status(200).json({ status: "ok" });
 });
 
 // Basic identity for backend UI (HMAC-protected)
-app.get("/relay/identity",
-  hmacGuard,
-  (req, res) => {
-    res.json({
-      ok: true,
-      service: "relay",
-      version: process.env.RELAY_VERSION || "unknown",
-      node: process.version,
-      uptime: process.uptime()
-    });
+app.get("/relay/identity", (req, res) => {
+  res.json({
+    ok: true,
+    service: "relay",
+    version: process.env.RELAY_VERSION || "unknown",
+    node: process.version,
+    uptime: process.uptime()
   });
+});
+
+function buildSentence(command, params = {}) {
+  const sentence = [String(command || "").trim()];
+  for (const [key, value] of Object.entries(params)) {
+    if (!key || value === undefined || value === null) continue;
+    sentence.push(`=${key}=${value}`);
+  }
+  return sentence.filter(Boolean);
+}
 
 // Router registry endpoints (backend UI)
 app.use('/relay/routers', routerRegistry);
@@ -307,49 +268,46 @@ app.get("/relay/metrics", async (req, res) => {
 });
 
 // Mikrotik ARP print passthrough
-app.post("/relay/arp-print", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, handleArpPrint);
+app.post("/relay/arp-print", handleArpPrint);
 
 // ARP lookup wrapper for dashboard contract
-app.post("/relay/arp/lookup", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, handleArpLookup);
+app.post("/relay/arp/lookup", handleArpLookup);
 
 // Mikrotik ping passthrough
-app.post("/relay/ping",
-  tokenGuard("RELAY_TOKEN_TOOLS"),
-  hmacGuard,
-  async (req, res) => {
-    try {
-      const body = req.body || {};
-      const { mikId, target, count = 3 } = body;
-      if (!mikId || !target) return res.status(400).json({ ok: false, code: 'invalid_payload', message: 'mikId and target required' });
-      if (!routerHealth.canAttempt(mikId)) return res.status(409).json({ ok: false, code: 'router_circuit_open' });
-      const mik = getMikById(mikId);
-      const cmds = [`/ping address=${target} count=${count}`];
-      const result = await runMikrotikCommands(mik, cmds);
-      return res.json({ ok: !!result.ok, mikId, target, result });
-    } catch (e) { return handleError(res, e); }
-  });
+app.post("/relay/ping", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { mikId, target, count = 3 } = body;
+    if (!mikId || !target) return res.status(400).json({ ok: false, code: 'invalid_payload', message: 'mikId and target required' });
+    if (!routerHealth.canAttempt(mikId)) return res.status(409).json({ ok: false, code: 'router_circuit_open' });
+    const mik = getMikById(mikId);
+    const cmds = [`/ping address=${target} count=${count}`];
+    const result = await runMikrotikCommands(mik, cmds);
+    return res.json({ ok: !!result.ok, mikId, target, result });
+  } catch (e) { return handleError(res, e); }
+});
 
 // Exec sentences on Mikrotik by mikId (supports multiple commands)
-app.post("/relay/exec-by-device", tokenGuard("RELAY_TOKEN_EXEC"), hmacGuard, handleExecByDevice);
-app.post("/relay/exec", tokenGuard("RELAY_TOKEN_EXEC"), hmacGuard, handleExecByDevice);
+app.post("/relay/exec-by-device", handleExecByDevice);
+app.post("/relay/exec", handleRelayExec);
 
 // Dashboard hotspot wrappers
-app.post("/relay/hotspot/ensure-user", tokenGuard("RELAY_TOKEN_EXEC"), hmacGuard, handleEnsureHotspotUser);
-app.post("/hotspot/active", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, handleHotspotActive);
-app.get("/hotspot/active", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, (req, res) =>
+app.post("/relay/hotspot/ensure-user", handleEnsureHotspotUser);
+app.post("/hotspot/active", authMiddleware, handleHotspotActive);
+app.get("/hotspot/active", authMiddleware, (req, res) =>
   res.status(400).json({
     ok: false,
     code: "invalid_method",
     message: "Use POST /hotspot/active with JSON body { mikId }"
   })
 );
-app.post("/hotspot/kick", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, (req, res) => handleHotspotKick(req, res));
-app.post("/hotspot/kick/by-ip", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, (req, res) => handleHotspotKick(req, res, { ip: req.body && req.body.ip }));
-app.post("/hotspot/kick/by-mac", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, (req, res) => handleHotspotKick(req, res, { mac: req.body && req.body.mac }));
-app.post("/hotspot/kick/by-user", tokenGuard("RELAY_TOKEN_TOOLS"), hmacGuard, (req, res) => handleHotspotKick(req, res, { user: req.body && req.body.user }));
+app.post("/hotspot/kick", authMiddleware, (req, res) => handleHotspotKick(req, res));
+app.post("/hotspot/kick/by-ip", authMiddleware, (req, res) => handleHotspotKick(req, res, { ip: req.body && req.body.ip }));
+app.post("/hotspot/kick/by-mac", authMiddleware, (req, res) => handleHotspotKick(req, res, { mac: req.body && req.body.mac }));
+app.post("/hotspot/kick/by-user", authMiddleware, (req, res) => handleHotspotKick(req, res, { user: req.body && req.body.user }));
 
-app.post("/relay/hotspot/upload-redirect", tokenGuard("RELAY_TOKEN_EXEC"), hmacGuard, handleUploadRedirect);
-app.post("/relay/upload-redirect", tokenGuard("RELAY_TOKEN_EXEC"), hmacGuard, handleUploadRedirect);
+app.post("/relay/hotspot/upload-redirect", handleUploadRedirect);
+app.post("/relay/upload-redirect", handleUploadRedirect);
 
 /**
  * 1) device/hello
@@ -769,6 +727,73 @@ async function handleExecByDevice(req, res) {
   }
 }
 
+async function handleRelayExec(req, res) {
+  try {
+    const body = req.body || {};
+    const host = String(body.host || "").trim();
+    const user = String(body.user || "").trim();
+    const pass = String(body.pass || "").trim();
+    const port = body.port === undefined || body.port === null || body.port === ""
+      ? 8728
+      : Number(body.port);
+    const command = String(body.command || "").trim();
+    const params = body.params && typeof body.params === "object" && !Array.isArray(body.params)
+      ? body.params
+      : {};
+
+    if (!host || !user || !pass || !command || !Number.isInteger(port) || port <= 0) {
+      return res.status(400).json({
+        ok: false,
+        code: "invalid_payload",
+        message: "host, user, pass, port and command are required"
+      });
+    }
+
+    const sentence = buildSentence(command, params);
+    const result = await runMikrotikCommands({ host, user, pass, port }, [sentence]);
+
+    if (result.ok) {
+      logger.info("relay.exec.success", {
+        host,
+        port,
+        command,
+        hasParams: Object.keys(params).length > 0
+      });
+    } else {
+      logger.error("relay.exec.error", {
+        host,
+        port,
+        command,
+        hasParams: Object.keys(params).length > 0,
+        error: result.error || null
+      });
+    }
+
+    if (!result.ok) {
+      const message = result.error && result.error.message
+        ? result.error.message
+        : "failed to execute command";
+      return res.status(502).json({
+        ok: false,
+        code: "EXEC_ERROR",
+        message,
+        result
+      });
+    }
+
+    return res.status(200).json({ ok: true, result });
+  } catch (e) {
+    logger.error("relay.exec.error", {
+      message: e && e.message ? e.message : String(e)
+    });
+    return res.status(500).json({
+      ok: false,
+      code: "EXEC_ERROR",
+      message: e && e.message ? e.message : "failed to execute command"
+    });
+  }
+}
+
 async function handleArpPrint(req, res) {
   try {
     const body = req.body || {};
@@ -1104,7 +1129,7 @@ async function handleUploadRedirect(req, res) {
 }
 
 // Devices API (provision/deprovision/sync/status)
-app.post('/devices', hmacGuard, async (req, res) => {
+app.post('/devices', authMiddleware, async (req, res) => {
   try {
     const payload = req.body;
     const result = await relayManager.provisionDevice(payload);
@@ -1112,7 +1137,7 @@ app.post('/devices', hmacGuard, async (req, res) => {
   } catch (e) { return handleError(res, e); }
 });
 
-app.delete('/devices/:id', hmacGuard, async (req, res) => {
+app.delete('/devices/:id', authMiddleware, async (req, res) => {
   try {
     const id = req.params.id;
     const result = await relayManager.deprovisionDevice(id);
@@ -1120,7 +1145,7 @@ app.delete('/devices/:id', hmacGuard, async (req, res) => {
   } catch (e) { return handleError(res, e); }
 });
 
-app.post('/devices/:id/sync', hmacGuard, async (req, res) => {
+app.post('/devices/:id/sync', authMiddleware, async (req, res) => {
   try {
     const id = req.params.id;
     const result = await relayManager.syncDevice(id);
@@ -1128,13 +1153,8 @@ app.post('/devices/:id/sync', hmacGuard, async (req, res) => {
   } catch (e) { return handleError(res, e); }
 });
 
-app.get('/devices/:id/status', async (req, res) => {
+app.get('/devices/:id/status', authMiddleware, async (req, res) => {
   try {
-    // GETs can use token auth only
-    const token = extractRelayToken(req);
-    if (!token || !DEFAULT_ACCESS_TOKEN || token !== DEFAULT_ACCESS_TOKEN) {
-      return res.status(401).json({ ok: false, code: 'unauthorized' });
-    }
     const id = req.params.id;
     const status = await relayManager.healthCheck(id);
     res.json(status);
@@ -1147,7 +1167,7 @@ app.get('/devices/:id/status', async (req, res) => {
  * If devicePublicKey provided: create peer on VPS and return Mikrotik CLI to apply on device (safe, no private keys).
  * If not provided: return step-by-step instructions to generate key on Mikrotik and continue.
  */
-app.post('/mikrotik/bootstrap', hmacGuard, async (req, res) => {
+app.post('/mikrotik/bootstrap', authMiddleware, async (req, res) => {
   try {
     const { deviceId, devicePublicKey, tunnelIp, allowedIps } = req.body || {};
     if (!deviceId || !tunnelIp) return res.status(400).json({ ok: false, code: 'invalid_payload', message: 'deviceId and tunnelIp required' });
@@ -1208,7 +1228,7 @@ app.post('/mikrotik/bootstrap', hmacGuard, async (req, res) => {
 });
 
 // POST /relay/manager/register
-app.post('/relay/manager/register', hmacGuard, async (req, res) => {
+app.post('/relay/manager/register', async (req, res) => {
   try {
     const body = req.body || {};
     const { deviceId, deviceName, mikrotik = {}, wireguard = {} } = body;
@@ -1264,7 +1284,7 @@ app.post('/relay/manager/register', hmacGuard, async (req, res) => {
  * - Webhook Pix confirmando pagamento
  * - Backend manda pedidoId, mikId, deviceToken
  */
-app.post("/relay/authorize-by-pedido", hmacGuard, async (req, res) => {
+app.post("/relay/authorize-by-pedido", async (req, res) => {
   try {
     const { pedidoId, mikId, deviceToken } = req.body;
     if (!pedidoId || !mikId || !deviceToken) {
@@ -1289,7 +1309,7 @@ app.post("/relay/authorize-by-pedido", hmacGuard, async (req, res) => {
  * - Botão "já paguei e não liberou"
  * - Backend manda pedidoId, mikId, deviceToken, ipAtual, macAtual
  */
-app.post("/relay/resync-device", hmacGuard, async (req, res) => {
+app.post("/relay/resync-device", async (req, res) => {
   try {
     const { pedidoId, mikId, deviceToken, ipAtual, macAtual } = req.body;
 
@@ -1314,7 +1334,7 @@ app.post("/relay/resync-device", hmacGuard, async (req, res) => {
  * 4) revoke
  * - Usado por scheduler ou painel técnico pra derrubar sessão
  */
-app.post("/relay/revoke", hmacGuard, async (req, res) => {
+app.post("/relay/revoke", async (req, res) => {
   try {
     const { mikId, ip, mac } = req.body;
     if (!mikId || (!ip && !mac)) {
@@ -1335,7 +1355,7 @@ app.post("/relay/revoke", hmacGuard, async (req, res) => {
 });
 
 // New unified action endpoint (allowlist + audit + validation)
-app.post("/relay/action", hmacGuard, async (req, res) => {
+app.post("/relay/action", async (req, res) => {
   try {
     const { action, payload, source, traceId } = req.body || {};
     const result = await executeAction({ action, payload, source, traceId });
@@ -1355,7 +1375,7 @@ app.post("/relay/action", hmacGuard, async (req, res) => {
 });
 
 // Identity refresh: resolve sid -> pending payment -> authorize with current IP/MAC
-app.post("/relay/identity/refresh", hmacGuard, async (req, res) => {
+app.post("/relay/identity/refresh", async (req, res) => {
   try {
     const { sid, mac, ip, routerHint, identity } = req.body || {};
     const ipToUse = ip || req.ip;
@@ -1370,15 +1390,13 @@ app.post("/relay/identity/refresh", hmacGuard, async (req, res) => {
   }
 });
 
-// Identity status (public + ops via X-Relay-Internal)
+// Identity status
 app.get("/relay/identity/status", async (req, res) => {
   try {
     const sid = String(req.query.sid || '').trim();
     if (!sid) return res.status(400).json({ ok: false, code: 'missing_sid' });
 
-    // token middleware already enforced; ops mode via internal header
-    const internalToken = process.env.RELAY_INTERNAL_TOKEN;
-    const opsMode = internalToken && req.headers['x-relay-internal'] === internalToken;
+    const opsMode = true;
 
     const identity = await identityStore.getIdentity(sid);
     if (!identity) {
@@ -1490,14 +1508,9 @@ app.get("/relay/identity/status", async (req, res) => {
   }
 });
 
-// Ops-only retry-now
+// Retry-now
 app.post("/relay/identity/retry-now", async (req, res) => {
   try {
-    const internalToken = process.env.RELAY_INTERNAL_TOKEN;
-    if (!internalToken || req.headers['x-relay-internal'] !== internalToken) {
-      return res.status(403).json({ ok: false, code: 'forbidden_ops_only' });
-    }
-
     const sid = String(req.body && req.body.sid || '').trim();
     if (!sid) return res.status(400).json({ ok: false, code: 'missing_sid' });
 
@@ -1538,8 +1551,8 @@ app.post("/relay/identity/retry-now", async (req, res) => {
   }
 });
 
-// Internal WireGuard peers status (protected by RELAY_INTERNAL_TOKEN or optional whitelist)
-app.get('/internal/wireguard/peers/status', requireInternalAccess, async (req, res) => {
+// Internal WireGuard peers status (protected by Bearer + HMAC)
+app.get('/internal/wireguard/peers/status', async (req, res) => {
   try {
     // get raw status from wg reader
     const raw = await wireguardStatus.getPeersStatus();
@@ -1565,7 +1578,7 @@ app.get('/internal/wireguard/peers/status', requireInternalAccess, async (req, r
 });
 
 // Internal endpoints to manage peer bindings (protected)
-app.post('/internal/wireguard/peers/bind', requireInternalAccess, async (req, res) => {
+app.post('/internal/wireguard/peers/bind', async (req, res) => {
   try {
     const { publicKey, deviceId, mikrotikIp } = req.body || {};
     if (!publicKey || !deviceId || !mikrotikIp) return res.status(400).json({ ok: false, code: 'invalid_payload', message: 'publicKey, deviceId and mikrotikIp required' });
@@ -1577,7 +1590,7 @@ app.post('/internal/wireguard/peers/bind', requireInternalAccess, async (req, re
   }
 });
 
-app.delete('/internal/wireguard/peers/:publicKey', requireInternalAccess, async (req, res) => {
+app.delete('/internal/wireguard/peers/:publicKey', async (req, res) => {
   try {
     const publicKey = req.params.publicKey;
     if (!publicKey) return res.status(400).json({ ok: false, code: 'invalid_payload', message: 'publicKey required' });
@@ -1589,7 +1602,7 @@ app.delete('/internal/wireguard/peers/:publicKey', requireInternalAccess, async 
   }
 });
 
-app.get('/internal/wireguard/peers/bindings', requireInternalAccess, async (req, res) => {
+app.get('/internal/wireguard/peers/bindings', async (req, res) => {
   try {
     const list = await peerBinding.listBindings();
     res.json({ ok: true, bindings: list });
@@ -1600,7 +1613,7 @@ app.get('/internal/wireguard/peers/bindings', requireInternalAccess, async (req,
 });
 
 // Internal: probe mikrotik via tunnel. Body: { publicKey, username, password }
-app.post('/internal/mikrotik/probe', requireInternalAccess, async (req, res) => {
+app.post('/internal/mikrotik/probe', async (req, res) => {
   try {
     const { publicKey, username, password } = req.body || {};
     if (!publicKey || !username || !password) return res.status(400).json({ ok: false, code: 'invalid_payload', message: 'publicKey, username and password required' });
