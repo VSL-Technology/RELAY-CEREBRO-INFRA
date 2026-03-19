@@ -1,20 +1,86 @@
 // src/services/identityStore.js
 // Simple file-backed identity store: sid -> lastSeen/pending/applied
+// Locking: Redis SET NX (distributed mutex) with Promise-chain fallback if Redis is unavailable.
 import fs from 'fs';
 import path from 'path';
+import { randomBytes } from 'crypto';
+import redis from '../lib/redis.js';
+import logger from './logger.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const FILE = path.join(DATA_DIR, 'identity.json');
 const LAST_SEEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const APPLIED_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14d
 const APPLIED_MAX_ITEMS = 50;
-let _lock = Promise.resolve();
+const LOCK_TTL_MS = 10_000; // 10s max lock hold
+const LOCK_RETRY_DELAY_MS = 50;
+const LOCK_RETRY_MAX = 20; // up to ~1s total wait
 
-function withLock(fn) {
-  const run = _lock.then(fn, fn);
-  _lock = run.then(() => {}, () => {});
+// ─── Promise-chain lock (single-process fallback) ────────────────────────────
+let _localLock = Promise.resolve();
+
+function withLocalLock(fn) {
+  const run = _localLock.then(fn, fn);
+  _localLock = run.then(() => {}, () => {});
   return run;
 }
+
+// ─── Redis distributed lock (SET NX) ─────────────────────────────────────────
+
+async function acquireLock(key) {
+  const token = randomBytes(16).toString('hex');
+  const redisKey = `lock:${key}`;
+  for (let i = 0; i < LOCK_RETRY_MAX; i++) {
+    const acquired = await redis.set(redisKey, token, 'PX', LOCK_TTL_MS, 'NX');
+    if (acquired) return token;
+    await new Promise((r) => setTimeout(r, LOCK_RETRY_DELAY_MS));
+  }
+  return null; // could not acquire
+}
+
+// Lua script: only delete the key if we own it (atomic)
+const RELEASE_SCRIPT = `
+  if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+  else
+    return 0
+  end
+`;
+
+async function releaseLock(key, token) {
+  try {
+    await redis.eval(RELEASE_SCRIPT, 1, `lock:${key}`, token);
+  } catch (err) {
+    logger.warn('identityStore.release_lock_error', { key, message: err && err.message });
+  }
+}
+
+/**
+ * withLock: acquire Redis SET NX lock for the given key.
+ * Falls back to the process-local Promise-chain lock if Redis is unavailable.
+ */
+async function withLock(key, fn) {
+  let token = null;
+  try {
+    token = await acquireLock(key);
+  } catch (err) {
+    logger.warn('identityStore.redis_lock_error', { key, message: err && err.message });
+  }
+
+  if (!token) {
+    // Redis unavailable or lock contention: fall back to local serialisation
+    logger.warn('identityStore.lock_fallback', { key, reason: token === null ? 'contention' : 'redis_down' });
+    return withLocalLock(fn);
+  }
+
+  try {
+    return await Promise.resolve(fn());
+  } finally {
+    await releaseLock(key, token);
+  }
+}
+
+// ─── File helpers ─────────────────────────────────────────────────────────────
 
 function ensureDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -48,6 +114,8 @@ function findIdx(arr, sid) {
   return arr.findIndex((r) => r.sid === sid);
 }
 
+// ─── Public API ───────────────────────────────────────────────────────────────
+
 export function getIdentity(sid) {
   const all = readAll();
   return all.find((r) => r.sid === sid) || null;
@@ -62,7 +130,7 @@ export function getPending(sid) {
 
 export async function upsertLastSeen(sid, ctx = {}) {
   if (!sid) throw new Error('sid required');
-  return withLock(() => {
+  return withLock(`identity:${sid}`, () => {
     const all = readAll();
     const idx = findIdx(all, sid);
     const now = Date.now();
@@ -85,7 +153,7 @@ export async function upsertLastSeen(sid, ctx = {}) {
 export async function markPending(sid, pending = {}) {
   if (!sid) throw new Error('sid required');
   if (!pending.pedidoId) throw new Error('pedidoId required');
-  return withLock(() => {
+  return withLock(`identity:${sid}`, () => {
     const all = readAll();
     const idx = findIdx(all, sid);
     const now = Date.now();
@@ -110,7 +178,7 @@ export async function markPending(sid, pending = {}) {
 }
 
 export async function clearPending(sid, pedidoId = null) {
-  return withLock(() => {
+  return withLock(`identity:${sid}`, () => {
     const all = readAll();
     const idx = findIdx(all, sid);
     if (idx === -1) return false;
@@ -124,7 +192,7 @@ export async function clearPending(sid, pedidoId = null) {
 
 export async function markPendingFailed(sid, { pedidoId, failCode, attempts = 0, nextEligibleAt = null } = {}) {
   if (!sid || !pedidoId) throw new Error('sid and pedidoId required');
-  return withLock(() => {
+  return withLock(`identity:${sid}`, () => {
     const all = readAll();
     const idx = findIdx(all, sid);
     if (idx === -1) return false;
@@ -145,7 +213,7 @@ export async function markPendingFailed(sid, { pedidoId, failCode, attempts = 0,
 
 export async function markPendingApplied(sid, pedidoId) {
   if (!sid || !pedidoId) throw new Error('sid and pedidoId required');
-  return withLock(() => {
+  return withLock(`identity:${sid}`, () => {
     const all = readAll();
     const idx = findIdx(all, sid);
     if (idx === -1) return false;
@@ -174,7 +242,7 @@ export function isApplied(sid, actionKey) {
 
 export async function markApplied(sid, actionKey, meta = {}) {
   if (!sid || !actionKey) throw new Error('sid and actionKey required');
-  return withLock(() => {
+  return withLock(`identity:${sid}`, () => {
     const all = readAll();
     const idx = findIdx(all, sid);
     if (idx === -1) throw new Error('sid not found for markApplied');
@@ -194,22 +262,19 @@ export async function markApplied(sid, actionKey, meta = {}) {
 
 // internal: prune expired lastSeen/pending/applied
 export async function prune() {
-  return withLock(() => {
+  return withLock('identity:global', () => {
     const all = readAll();
     const now = Date.now();
     const pruned = all.map((rec) => {
-      // prune lastSeen
       if (rec.lastSeen && rec.lastSeen.ts && (now - rec.lastSeen.ts) > LAST_SEEN_TTL_MS) {
         rec.lastSeen = null;
       }
-      // prune pending by expiresAt if present
       if (rec.pending && rec.pending.expiresAt) {
         const expTs = new Date(rec.pending.expiresAt).getTime();
         if (Number.isFinite(expTs) && expTs < now) {
           rec.pending = null;
         }
       }
-      // prune applied already handled in markApplied; keep again for safety
       if (Array.isArray(rec.applied)) {
         rec.applied = rec.applied
           .filter((a) => a.at && (now - a.at) <= APPLIED_MAX_AGE_MS)
