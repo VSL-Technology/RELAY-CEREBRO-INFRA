@@ -109,7 +109,14 @@ function normalizeClientIp(ip) {
   return raw;
 }
 
-function verifyHmac(req) {
+// HMAC timestamp tolerance — configurable, default 300s (5 min) to tolerate clock skew.
+// Replay protection is handled by nonce dedup in Redis (see verifyHmac).
+const HMAC_WINDOW_MS = Number(process.env.HMAC_WINDOW_MS || 300000);
+
+async function verifyHmac(req) {
+  // Already verified by an earlier middleware in this request chain — skip
+  if (req._hmacVerified) return;
+
   const secret = process.env.RELAY_API_SECRET;
   if (!secret) {
     throw new Error("HMAC_SECRET_NOT_CONFIGURED");
@@ -127,7 +134,7 @@ function verifyHmac(req) {
   }
 
   const now = Date.now();
-  if (Math.abs(now - Number(ts)) > 30000) {
+  if (Math.abs(now - Number(ts)) > HMAC_WINDOW_MS) {
     throw new Error("HMAC_TS_OUT_OF_RANGE");
   }
 
@@ -149,11 +156,25 @@ function verifyHmac(req) {
     throw new Error("HMAC_SIGNATURE_INVALID");
   }
 
-  // Mark request as HMAC-verified to prevent double-check in chained middleware
+  // Nonce dedup: store nonce in Redis for the duration of HMAC_WINDOW_MS to block replays.
+  // Fail-open: if Redis is unavailable, skip dedup and log a warning.
+  try {
+    const nonceKey = `nonce:${nonce}`;
+    const stored = await redis.set(nonceKey, '1', 'PX', HMAC_WINDOW_MS, 'NX');
+    if (!stored) {
+      throw new Error("HMAC_NONCE_REPLAYED");
+    }
+  } catch (err) {
+    if (err.message === "HMAC_NONCE_REPLAYED") throw err;
+    // Redis error — log warning and allow request through (fail-open)
+    logger.warn("hmac.nonce_redis_error", { message: err && err.message });
+  }
+
+  // Mark request as verified to prevent double-check if middleware is applied twice
   req._hmacVerified = true;
 }
 
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   const provided = extractRelayToken(req);
   const ip = normalizeClientIp(req.ip);
   if (provided !== RELAY_TOKEN) {
@@ -165,11 +186,8 @@ function authMiddleware(req, res, next) {
     return res.status(401).json({ ok: false, code: "UNAUTHORIZED" });
   }
 
-  // Skip HMAC re-verification if already verified by an earlier middleware in this request
-  if (req._hmacVerified) return next();
-
   try {
-    verifyHmac(req);
+    await verifyHmac(req);
   } catch (err) {
     logger.warn("security.hmac.denied", {
       path: req.originalUrl || req.url,
@@ -186,7 +204,7 @@ function authMiddleware(req, res, next) {
   next();
 }
 
-function validateRelayAuth(req, res, next) {
+async function validateRelayAuth(req, res, next) {
   if (SESSION_PUBLIC) {
     return next();
   }
@@ -204,7 +222,7 @@ function validateRelayAuth(req, res, next) {
   }
 
   try {
-    verifyHmac(req);
+    await verifyHmac(req);
   } catch (err) {
     logger.warn("session.security.blocked", {
       reason: err && err.message ? err.message : "HMAC_INVALID",
