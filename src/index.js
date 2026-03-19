@@ -25,6 +25,7 @@ import wireguardStatus from './services/wireguardStatus.js';
 import peerBinding from './services/peerBinding.service.js';
 import mikrotikProbe from './services/mikrotikProbe.service.js';
 import routerRegistry from './routes/routerRegistry.js';
+import sessionRoutes from "./routes/sessionRoutes.js";
 import pagarmeWebhookRoutes from "./routes/pagarmeWebhook.js";
 import reconciler from './services/reconciler.js';
 import { runMikrotikCommands } from "./services/mikrotik.js";
@@ -33,8 +34,14 @@ import identityService from './services/identityService.js';
 import identityStore from './services/identityStore.js';
 import routerHealth from './services/routerHealth.js';
 import audit from './services/audit.js';
+import sessionStore from "./services/sessionStore.js";
+import hotspotManager from "./services/hotspotManager.js";
+import sessionCleaner from "./services/sessionCleaner.js";
+import activeSessionMonitor from "./services/activeSessionMonitor.js";
 import { JOB_RUNNER_ENABLED } from "./config/controlPlane.js";
 import { getPrisma } from "./lib/prisma.js";
+import redis, { assertRedisReady } from "./lib/redis.js";
+import { buildSentence } from "./lib/buildSentence.js";
 import { ensureDefaultTenant } from "./bootstrap/ensureDefaultTenant.js";
 import healthRoute, { healthLiveRoute, healthReadyRoute } from "./routes/healthRoute.js";
 
@@ -62,6 +69,7 @@ const isStrictSecurity =
 const MAX_REDIRECT_HTML_BYTES = 16 * 1024;
 const DEFAULT_REDIRECT_PATH = "hotspot4/redirect.html";
 const DEFAULT_HOTSPOT_PROFILE = process.env.RELAY_DEFAULT_HOTSPOT_PROFILE || "hsprof1";
+const REDIS_REQUIRED = String(process.env.REDIS_REQUIRED || "false") === "true";
 
 if (!RELAY_TOKEN) {
   logger.error("missing token configuration: set RELAY_TOKEN");
@@ -80,6 +88,9 @@ function extractRelayToken(req) {
 }
 
 const RETRY_NOW_COOLDOWN_MS = Number(process.env.RELAY_RETRY_NOW_COOLDOWN_MS || 30000);
+const SESSION_PUBLIC =
+  process.env.SESSION_PUBLIC === "1" ||
+  process.env.SESSION_PUBLIC === "true";
 const lastRetryNowBySid = new Map();
 if (isStrictSecurity) {
   if (!process.env.RELAY_API_SECRET) {
@@ -137,6 +148,9 @@ function verifyHmac(req) {
   if (expectedBuf.length !== providedBuf.length || !crypto.timingSafeEqual(expectedBuf, providedBuf)) {
     throw new Error("HMAC_SIGNATURE_INVALID");
   }
+
+  // Mark request as HMAC-verified to prevent double-check in chained middleware
+  req._hmacVerified = true;
 }
 
 function authMiddleware(req, res, next) {
@@ -150,6 +164,9 @@ function authMiddleware(req, res, next) {
     });
     return res.status(401).json({ ok: false, code: "UNAUTHORIZED" });
   }
+
+  // Skip HMAC re-verification if already verified by an earlier middleware in this request
+  if (req._hmacVerified) return next();
 
   try {
     verifyHmac(req);
@@ -167,6 +184,41 @@ function authMiddleware(req, res, next) {
   }
 
   next();
+}
+
+function validateRelayAuth(req, res, next) {
+  if (SESSION_PUBLIC) {
+    return next();
+  }
+
+  const provided = extractRelayToken(req);
+  const ip = normalizeClientIp(req.ip);
+
+  if (provided !== RELAY_TOKEN) {
+    logger.warn("session.security.blocked", {
+      reason: "unauthorized",
+      path: req.originalUrl || req.url,
+      ip
+    });
+    return res.status(401).json({ ok: false, code: "UNAUTHORIZED" });
+  }
+
+  try {
+    verifyHmac(req);
+  } catch (err) {
+    logger.warn("session.security.blocked", {
+      reason: err && err.message ? err.message : "HMAC_INVALID",
+      path: req.originalUrl || req.url,
+      method: req.method,
+      ip
+    });
+    return res.status(401).json({
+      ok: false,
+      code: err.message
+    });
+  }
+
+  return next();
 }
 
 
@@ -189,6 +241,147 @@ app.use(express.json({
 app.get("/health/live", healthLiveRoute);
 app.get("/health/ready", healthReadyRoute);
 app.get("/health", healthRoute);
+app.get("/health/full", async (req, res) => {
+  let redisOk = false;
+
+  try {
+    await redis.ping();
+    redisOk = true;
+  } catch {}
+
+  return res.json({
+    ok: true,
+    redis: redisOk,
+    uptime: process.uptime()
+  });
+});
+
+app.use("/session", validateRelayAuth);
+app.use("/session", sessionRoutes);
+
+app.post("/session/start", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const ip = typeof body.ip === "string" ? body.ip.trim() : "";
+    const mac = typeof body.mac === "string" ? body.mac.trim() : null;
+    const router = typeof body.router === "string" ? body.router.trim() : null;
+    const identity = typeof body.identity === "string" ? body.identity.trim() : null;
+
+    if (!ip) {
+      return res.status(400).json({
+        ok: false,
+        code: "invalid_payload",
+        message: "ip required"
+      });
+    }
+
+    const session = await sessionStore.createSession({
+      ip,
+      mac,
+      router,
+      identity
+    });
+
+    logger.info("session.start", {
+      sessionId: session.sessionId,
+      ip: session.ip,
+      mac: session.mac,
+      router: session.router
+    });
+
+    return res.json({
+      ok: true,
+      sessionId: session.sessionId
+    });
+  } catch (err) {
+    logger.error("session.start_error", { message: err && err.message ? err.message : String(err) });
+    return res.status(500).json({ ok: false, code: "internal_error" });
+  }
+});
+
+app.post("/session/kick", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+
+    if (!sessionId) {
+      return res.status(400).json({
+        ok: false,
+        code: "invalid_payload",
+        message: "sessionId required"
+      });
+    }
+
+    const session = await sessionStore.getSession(sessionId);
+    if (!session) {
+      return res.status(404).json({
+        ok: false,
+        code: "session_not_found"
+      });
+    }
+
+    const result = await hotspotManager.kickSession(session);
+    return res.json({
+      ok: true,
+      kicked: !!result.kicked,
+      notFound: !!result.notFound,
+      result
+    });
+  } catch (err) {
+    logger.error("session.kick_endpoint_error", {
+      message: err && err.message ? err.message : String(err)
+    });
+    return res.status(500).json({ ok: false, code: "internal_error" });
+  }
+});
+
+app.get("/session/active", async (req, res) => {
+  try {
+    const sessions = (await sessionStore.listSessions()).map((session) => ({
+      sessionId: session.sessionId,
+      ip: session.ip,
+      active: !!session.active,
+      status: session.status
+    }));
+
+    return res.json({
+      ok: true,
+      sessions
+    });
+  } catch (err) {
+    logger.error("session.active_list_error", { message: err && err.message ? err.message : String(err) });
+    return res.status(500).json({ ok: false, code: "internal_error" });
+  }
+});
+
+app.get("/session/:sessionId", async (req, res) => {
+  try {
+    const sessionId = String(req.params.sessionId || "").trim();
+    const session = await sessionStore.getSession(sessionId);
+
+    if (!session) {
+      return res.status(404).json({
+        ok: false,
+        code: "session_not_found"
+      });
+    }
+
+    logger.info("session.get", {
+      sessionId: session.sessionId,
+      ip: session.ip,
+      mac: session.mac,
+      router: session.router
+    });
+
+    return res.json({
+      ok: true,
+      session
+    });
+  } catch (err) {
+    logger.error("session.get_error", { message: err && err.message ? err.message : String(err) });
+    return res.status(500).json({ ok: false, code: "internal_error" });
+  }
+});
 
 app.use((req, res, next) => {
   if (req.path.startsWith("/relay") || req.path.startsWith("/internal")) {
@@ -212,15 +405,6 @@ app.get("/relay/identity", (req, res) => {
     uptime: process.uptime()
   });
 });
-
-function buildSentence(command, params = {}) {
-  const sentence = [String(command || "").trim()];
-  for (const [key, value] of Object.entries(params)) {
-    if (!key || value === undefined || value === null) continue;
-    sentence.push(`=${key}=${value}`);
-  }
-  return sentence.filter(Boolean);
-}
 
 // Router registry endpoints (backend UI)
 app.use('/relay/routers', routerRegistry);
@@ -315,17 +499,33 @@ app.post("/relay/upload-redirect", handleUploadRedirect);
  * - Se não tiver token, relay cria
  * - Se tiver, relay atualiza ip/mac
  */
-app.post("/relay/device/hello", (req, res) => {
+app.post("/relay/device/hello", authMiddleware, (req, res) => {
+  const ip = normalizeClientIp(req.ip);
   try {
-    const { deviceToken, mikId, ip, mac, userAgent } = req.body;
+    const { deviceToken, mikId, ip: bodyIp, mac, userAgent } = req.body;
 
-    if (!mikId || !ip || !mac) {
+    if (!mikId || !bodyIp || !mac) {
+      logger.warn("device_hello.rejected", { reason: "missing_fields", ip, mikId });
       return res.status(400).json({
+        ok: false,
+        code: "invalid_payload",
         error: "Campos obrigatórios: mikId, ip, mac"
       });
     }
 
-    const dev = registerOrUpdateDevice({ deviceToken, mikId, ip, mac, userAgent });
+    // Validate that mikId is a known MikroTik node
+    try {
+      getMikById(mikId);
+    } catch (e) {
+      if (e.code === 'MIKROTIK_NODE_NOT_FOUND') {
+        logger.warn("device_hello.rejected", { reason: "unknown_mikId", ip, mikId });
+        return res.status(403).json({ ok: false, code: "unknown_router", error: "mikId not found in configured nodes" });
+      }
+      // If MIKROTIK_NODES is not configured, log warning but allow through
+      logger.warn("device_hello.mikid_validation_skipped", { reason: e.code, ip, mikId });
+    }
+
+    const dev = registerOrUpdateDevice({ deviceToken, mikId, ip: bodyIp, mac, userAgent });
 
     res.json({
       ok: true,
@@ -339,7 +539,7 @@ app.post("/relay/device/hello", (req, res) => {
       message: err && err.message,
       stack: err && err.stack
     });
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ ok: false, code: "internal_error", error: err.message });
   }
 });
 
@@ -1638,8 +1838,19 @@ app.post('/internal/mikrotik/probe', async (req, res) => {
   }
 });
 
+const redisOk = await assertRedisReady();
+if (!redisOk && REDIS_REQUIRED) {
+  logger.error("fatal.redis_required_unavailable");
+  process.exit(1);
+}
+
 app.listen(PORT, process.env.BIND_HOST || "127.0.0.1", async () => {
   logger.info('relay.online', { port: PORT, host: process.env.BIND_HOST || "127.0.0.1" });
+  logger.info("relay.boot", {
+    port: process.env.PORT,
+    redis: process.env.REDIS_HOST,
+    env: process.env.NODE_ENV
+  });
   try {
     getPrisma();
     const tenant = await ensureDefaultTenant();
@@ -1662,6 +1873,8 @@ app.listen(PORT, process.env.BIND_HOST || "127.0.0.1", async () => {
     } else {
       logger.info("jobRunner.disabled");
     }
+    sessionCleaner.startSessionCleaner();
+    activeSessionMonitor.startActiveSessionMonitor();
     reconciler.start();
   } catch (e) {
     logger.error('failed to start background services', e && e.message);
