@@ -45,6 +45,7 @@ import { buildSentence } from "./lib/buildSentence.js";
 import { ensureDefaultTenant } from "./bootstrap/ensureDefaultTenant.js";
 import healthRoute, { healthLiveRoute, healthReadyRoute } from "./routes/healthRoute.js";
 import { runWithRequestContext } from "./lib/requestContext.js";
+import { register, activeSessions } from "./lib/metrics.js";
 import {
   isValidIp,
   isValidMac,
@@ -141,6 +142,25 @@ function normalizeClientIp(ip) {
 // HMAC timestamp tolerance — configurable, default 300s (5 min) to tolerate clock skew.
 // Replay protection is handled by nonce dedup in Redis (see verifyHmac).
 const HMAC_WINDOW_MS = Number(process.env.HMAC_WINDOW_MS || 300000);
+
+async function refreshActiveSessionMetrics() {
+  activeSessions.reset();
+
+  const sessions = await sessionStore.listSessions();
+  const counts = new Map();
+
+  for (const session of sessions) {
+    if (!session || session.status !== "authorized") continue;
+
+    const routerId =
+      String(session.router || session.identity || "").trim() || "unknown";
+    counts.set(routerId, (counts.get(routerId) || 0) + 1);
+  }
+
+  for (const [routerId, total] of counts.entries()) {
+    activeSessions.set({ router_id: routerId }, total);
+  }
+}
 
 async function verifyHmac(req) {
   // Already verified by an earlier middleware in this request chain — skip
@@ -311,6 +331,39 @@ app.get("/health/full", async (req, res) => {
     redis: redisOk,
     uptime: process.uptime()
   });
+});
+
+// Prometheus metrics scrape endpoint.
+app.get("/metrics", async (req, res) => {
+  const token = req.headers["x-metrics-token"];
+  const expected = process.env.METRICS_TOKEN;
+
+  if (expected) {
+    if (token !== expected) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+  } else {
+    const ip = normalizeClientIp(req.ip ?? req.socket?.remoteAddress ?? "");
+    const isLocal =
+      ip === "127.0.0.1" ||
+      ip === "::1" ||
+      ip === "::ffff:127.0.0.1";
+
+    if (!isLocal) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+  }
+
+  try {
+    await refreshActiveSessionMetrics();
+  } catch (error) {
+    logger.warn("metrics.active_sessions_refresh_error", {
+      message: error && error.message ? error.message : String(error)
+    });
+  }
+
+  res.set("Content-Type", register.contentType);
+  res.end(await register.metrics());
 });
 
 app.use("/session", validateRelayAuth);
