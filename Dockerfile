@@ -1,25 +1,19 @@
-FROM node:20-alpine
-
+FROM node:20-alpine AS deps
 WORKDIR /app
-
-RUN apk add --no-cache wireguard-tools
-
-# Copia manifestos primeiro
 COPY package*.json ./
+RUN npm ci --only=production
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 relay
+COPY --from=deps /app/node_modules ./node_modules
+COPY src ./src
 COPY prisma ./prisma
+RUN node_modules/.bin/prisma generate
 
-# Instala dependências
-RUN npm ci --omit=dev
-
-# Gera Prisma Client
-RUN npx prisma generate
-
-# Copia restante do projeto
-COPY . .
-
+USER relay
 EXPOSE 3001
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:3000/health || exit 1
-
-CMD ["node", "src/index.js"]
+ENV PORT=3001
+CMD ["node", "--experimental-vm-modules", "src/index.js"]
