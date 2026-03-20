@@ -1,35 +1,35 @@
 #!/bin/sh
 set -e
 
-echo "==> Verificando variáveis obrigatórias..."
-REQUIRED_VARS="RELAY_MASTER_KEY REDIS_URL HMAC_SECRET MIKROTIK_NODES"
-for var in $REQUIRED_VARS; do
-  if [ -z "$(eval echo \$$var)" ]; then
-    echo "ERRO: $var não está definido"
-    exit 1
+echo "[pre-deploy] Verificando variáveis obrigatórias..."
+MISSING=""
+for var in RELAY_MASTER_KEY REDIS_URL HMAC_SECRET; do
+  eval "val=\$$var"
+  if [ -z "$val" ]; then
+    MISSING="$MISSING $var"
   fi
 done
+if [ -n "$MISSING" ]; then
+  echo "[pre-deploy] ERRO: variáveis não definidas:$MISSING"
+  exit 1
+fi
+echo "[pre-deploy] Variáveis OK"
 
-echo "==> Criptografando senhas legadas em devices.json..."
+echo "[pre-deploy] Criptografando senhas em devices.json..."
 if [ -f "data/devices.json" ]; then
-  node src/scripts/encrypt-devices.js
+  node src/scripts/encrypt-devices.js && echo "[pre-deploy] devices.json atualizado"
 else
-  echo "data/devices.json não encontrado — pulando migração"
+  echo "[pre-deploy] data/devices.json não encontrado — pulando"
 fi
 
-echo "==> Verificando conectividade Redis..."
-node -e "
-import { createClient } from 'redis';
-const c = createClient({ url: process.env.REDIS_URL });
-await c.connect();
-await c.ping();
-await c.disconnect();
-console.log('Redis OK');
-" 2>/dev/null || node -e "
-const Redis = require('ioredis');
-const r = new Redis(process.env.REDIS_URL);
-r.ping().then(() => { console.log('Redis OK'); r.disconnect(); process.exit(0); })
-  .catch(e => { console.error('Redis FALHOU:', e.message); process.exit(1); });
-"
+echo "[pre-deploy] Testando conexão Redis..."
+node --input-type=module << 'EOF'
+import Redis from 'ioredis'
+const r = new Redis(process.env.REDIS_URL, { lazyConnect: true })
+await r.connect()
+await r.ping()
+await r.quit()
+console.log('[pre-deploy] Redis OK')
+EOF
 
-echo "==> Tudo pronto para deploy"
+echo "[pre-deploy] Tudo pronto para deploy ✓"
