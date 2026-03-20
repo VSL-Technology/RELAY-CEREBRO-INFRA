@@ -16,10 +16,12 @@
 
 ## Segurança
 - Configure `BACKEND_HMAC_SECRET` em ambos os lados para HMAC bidirecional.
-- Use `RELAY_API_SECRET` para HMAC em endpoints HTTP mutáveis (`/devices`, `/mikrotik/bootstrap`, etc).
-- Token de acesso: usar `RELAY_TOKEN` como token base; se não definido, o relay aceita fallback de escopo (`RELAY_TOKEN_TOOLS`/`RELAY_TOKEN_EXEC`). `RELAY_INTERNAL_TOKEN` protege endpoints internos.
-- Rate-limit: `RELAY_RATE_WINDOW_MS` e `RELAY_RATE_LIMIT`.
+- Use `RELAY_API_SECRET` para HMAC em endpoints HTTP mutáveis.
+- Token de acesso: usar `Authorization: Bearer <RELAY_TOKEN>` em todas as rotas protegidas.
+- Toda request protegida deve carregar `x-relay-ts`, `x-relay-nonce` e `x-relay-signature: v1=<hex>`.
+- Rate-limit: `RELAY_RATE_WINDOW_MS` e `RATE_LIMIT_PER_ROUTER`.
 
 ## Observabilidade
 - Métricas expostas em `/relay/metrics`.
 - Auditoria: logs JSON com `traceId/eventId` em cada etapa (attempt/success/fail).
+- Request tracing HTTP: `X-Request-ID` em todas as respostas e `reqId` nos logs.

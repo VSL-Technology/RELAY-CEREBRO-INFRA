@@ -1,19 +1,22 @@
 # Relay “Cérebro” – Visão Geral
 
 ## Flows principais
-- **HTTP API** (`src/index.js`): health, metrics, device/hello, authorize/resync/revoke, action allowlist, WireGuard internals, mikrotik bootstrap.
+- **HTTP API** (`src/index.js`): health, metrics, `device/hello`, identidade, sessões, action allowlist, WireGuard internos e upload de redirect.
 - **Ações** (`src/services/actionHandler.js`): AUTHORIZE_BY_PEDIDO, RESYNC_DEVICE, REVOKE_SESSION com validação + auditoria + métricas/latência (por ação e por roteador).
 - **Eventos** (`src/services/eventConsumer.js` + `stateMachine.js`): consome BACKEND_EVENTS_URL com HMAC opcional, deduplica, processa TRIAL/RELEASE/REVOKE, cria jobs de revoke, circuit breaker por roteador e opcional por peer OFFLINE (handshake age).
-- **Jobs** (`jobStore`/`jobRunner`): file/SQLite/Redis, locks, backoff configuráveis.
+- **Jobs** (`jobStore`/`jobRunner`): file/SQLite/Redis, heartbeat de lock, backoff configurável e retries idempotentes.
 - **WireGuard** (`wireguardManager`, `wireguardStatus`, `reconciler`): adiciona/remove peers, lê estado, reconcilia desired vs real e cria bindings faltantes (peer→deviceId/mikrotikIp).
-- **Mikrotik** (`mikrotik.js`, `mikrotikService.js`, `mikrotikProbe.service.js`): comandos idempotentes, modo DRY_RUN, bootstrap/config mínima e usuário técnico (senha obrigatória para aplicar).
+- **Mikrotik** (`mikrotik.js`, `mikrotikService.js`, `mikrotikProbe.service.js`): comandos idempotentes, parsers compartilhados de hotspot, modo DRY_RUN, bootstrap/config mínima e usuário técnico.
 - **Registro** (`registry/deviceRegistry.js`): devices/peers/tokens unificados em `data/devices.json`.
+- **Sessões** (`sessionStore`, `sessionCleaner`, `activeSessionMonitor`, `sessionRoutes`): persistência em Redis, limpeza paralela e monitor de atividade por roteador.
 
 ## Segurança e HMAC
-- Tokens: `RELAY_TOKEN` (token base para chamadas gerais, com fallback para `RELAY_TOKEN_TOOLS`/`RELAY_TOKEN_EXEC`), `RELAY_INTERNAL_TOKEN` (endpoints internos).
+- Tokens: `RELAY_TOKEN` é o Bearer único usado nas rotas protegidas.
 - HMAC: `RELAY_API_SECRET` para POST/DELETE/SYNC; `BACKEND_HMAC_SECRET` para eventos/ACKs (`BACKEND_REQUIRE_HMAC=1` para forçar).
-- Modo estrito: `RELAY_STRICT_SECURITY=1` exige `RELAY_API_SECRET` e `RELAY_INTERNAL_TOKEN` no boot.
-- Rate-limit: `RELAY_RATE_WINDOW_MS`/`RELAY_RATE_LIMIT`.
+- Modo estrito: `RELAY_STRICT_SECURITY=1` endurece o boot de segurança.
+- Replay protection: nonce dedup em Redis e janela de 300s (`HMAC_WINDOW_MS`).
+- Request tracing: toda request recebe `X-Request-ID` e gera logs com `reqId`.
+- Rate-limit: `RELAY_RATE_WINDOW_MS`/`RATE_LIMIT_PER_ROUTER` com chave por roteador.
 
 ## Observabilidade
 - Métricas em `/relay/metrics`: counters por ação/roteador (`action.*`, `router.<mikId>.*`), jobs, processed events.
