@@ -6,6 +6,7 @@
 import redis from '../lib/redis.js';
 import metrics from './metrics.js';
 import logger from './logger.js';
+import { circuitBreakerState } from '../lib/metrics.js';
 
 const FAILURE_THRESHOLD = parseInt(process.env.CB_FAILURE_THRESHOLD || '5', 10);
 const RECOVERY_TIMEOUT_MS = parseInt(process.env.CB_RECOVERY_TIMEOUT_MS || '60000', 10);
@@ -25,6 +26,17 @@ const store = new Map();
 
 function redisKey(routerId) {
   return `cb:router:${routerId}`;
+}
+
+function isCircuitOpen(health, now = Date.now()) {
+  return Boolean(health && health.openUntil && Number(health.openUntil) > now);
+}
+
+function setCircuitBreakerGauge(routerId, health, now = Date.now()) {
+  circuitBreakerState.set(
+    { router_id: routerId },
+    isCircuitOpen(health, now) ? 1 : 0
+  );
 }
 
 function parseRedisHash(data) {
@@ -58,7 +70,10 @@ async function refreshFromRedis(routerId) {
   try {
     const data = await redis.hgetall(redisKey(routerId));
     const parsed = parseRedisHash(data);
-    if (parsed) store.set(routerId, parsed);
+    if (parsed) {
+      store.set(routerId, parsed);
+      setCircuitBreakerGauge(routerId, parsed);
+    }
   } catch (err) {
     logger.warn('cb.redis_read_error', { routerId, message: err && err.message });
   }
@@ -96,6 +111,7 @@ export function updateRouterHealth(routerId, classification) {
   if (!routerId) return;
   const h = getHealth(routerId);
   const now = Date.now();
+  const wasOpen = isCircuitOpen(h, now);
   const next = { ...h, lastErrCode: classification.code || h.lastErrCode };
 
   if (classification.class === 'setup') {
@@ -117,8 +133,22 @@ export function updateRouterHealth(routerId, classification) {
   }
 
   store.set(routerId, next);
+  setCircuitBreakerGauge(routerId, next, now);
   persistToRedis(routerId, next);
   metrics.inc(`relay.router_health_state_${next.state}`);
+
+  const isOpenNow = isCircuitOpen(next, now);
+  if (!wasOpen && isOpenNow) {
+    logger.warn('circuit_breaker_opened', {
+      router_id: routerId,
+      failures: next.consecutiveFails
+    });
+  } else if (wasOpen && !isOpenNow) {
+    logger.info('circuit_breaker_recovered', {
+      router_id: routerId
+    });
+  }
+
   return next;
 }
 
