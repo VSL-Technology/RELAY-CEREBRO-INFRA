@@ -45,7 +45,12 @@ import { buildSentence } from "./lib/buildSentence.js";
 import { ensureDefaultTenant } from "./bootstrap/ensureDefaultTenant.js";
 import healthRoute, { healthLiveRoute, healthReadyRoute } from "./routes/healthRoute.js";
 import { runWithRequestContext } from "./lib/requestContext.js";
-import { register, activeSessions } from "./lib/metrics.js";
+import {
+  register,
+  activeSessions,
+  httpRequestDuration,
+  httpRequestsTotal
+} from "./lib/metrics.js";
 import {
   isValidIp,
   isValidMac,
@@ -298,6 +303,31 @@ app.use((req, res, next) => {
   req.requestId = reqId;
   res.setHeader("X-Request-ID", reqId);
   runWithRequestContext({ reqId }, () => next());
+});
+app.use((req, res, next) => {
+  const start = Date.now();
+
+  res.on("finish", () => {
+    const duration = (Date.now() - start) / 1000;
+    const mountedRoute =
+      typeof req.route?.path === "string"
+        ? `${req.baseUrl || ""}${req.route.path}`
+        : req.path;
+    const route = String(mountedRoute || req.path || "/")
+      .replace(/\/[0-9a-f-]{8,}/gi, "/:id")
+      .replace(/\/\d+/g, "/:n");
+
+    const labels = {
+      method: req.method,
+      route,
+      status_code: String(res.statusCode)
+    };
+
+    httpRequestDuration.observe(labels, duration);
+    httpRequestsTotal.inc(labels);
+  });
+
+  next();
 });
 app.use(morgan(':remote-addr - :remote-user [:date[clf]] ":method :url HTTP/:http-version" :status :res[content-length] ":referrer" ":user-agent" req_id=:request-id'));
 
