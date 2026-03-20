@@ -3,6 +3,7 @@ import logger from "../services/logger.js";
 import sessionStore from "../services/sessionStore.js";
 import { runMikrotikCommands } from "../services/mikrotik.js";
 import { buildSentence } from "../lib/buildSentence.js";
+import { isValidIp, isValidMac, normalizeMac } from "../lib/validators.js";
 
 const router = express.Router();
 const PRINT_BINDING_COMMAND = "/ip/hotspot/ip-binding/print";
@@ -151,6 +152,14 @@ router.post("/init", async (req, res) => {
         message: "ip, mac, router and sessionId are required"
       });
     }
+    if (!isValidIp(ip)) {
+      return res.status(400).json({ ok: false, code: "invalid_ip" });
+    }
+    if (!isValidMac(mac)) {
+      return res.status(400).json({ ok: false, code: "invalid_mac" });
+    }
+
+    const normalizedMac = normalizeMac(mac);
 
     const existing = await sessionStore.getSession(sessionId);
     if (existing) {
@@ -163,7 +172,7 @@ router.post("/init", async (req, res) => {
     const session = await sessionStore.createSession({
       sessionId,
       ip,
-      mac,
+      mac: normalizedMac,
       router: routerName,
       status: "pending"
     });
