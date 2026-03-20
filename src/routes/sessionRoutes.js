@@ -218,6 +218,13 @@ router.post("/authorize", async (req, res) => {
         code: "session_not_found"
       });
     }
+    if (session.status !== "pending") {
+      return res.status(409).json({
+        ok: false,
+        code: "already_authorized",
+        status: session.status
+      });
+    }
 
     const authorized = await sessionStore.updateSession(sessionId, {
       status: "authorized",
