@@ -6,7 +6,7 @@ npm-debug.log*
 .env
 .env.*
 coverage
-data/devices.json
+data/
 docs
 __tests__
 scripts/test
