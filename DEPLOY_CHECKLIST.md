@@ -3,6 +3,7 @@
 ## Antes do primeiro deploy
 - [ ] Executar: sh scripts/pre-deploy.sh
 - [ ] Configurar variáveis (ver .env.example)
+- [ ] Configurar `RELAY_STORE=redis` para job lock distribuído entre instâncias
 - [ ] Confirmar RELAY_MASTER_KEY salvo em lugar seguro (sem ela as senhas são ilegíveis)
 - [ ] Redis provisionado e REDIS_URL configurada
 - [ ] data/devices.json NÃO está no Dockerfile (ver .dockerignore)
