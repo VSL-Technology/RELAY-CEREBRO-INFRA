@@ -41,42 +41,83 @@ const inMemoryLocks = new Map();
  * For file/sqlite: use in-memory Map
  */
 export async function acquireLock(jobId, ttlMs = 30000) {
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
   if (USE_REDIS) {
     try {
       const client = await ensureRedis();
-      const val = `${process.pid}-${Date.now()}`;
-      const r = await client.set(REDIS_KEYS.lockKey(jobId), val, 'PX', ttlMs, 'NX');
-      return r === 'OK';
+      const r = await client.set(REDIS_KEYS.lockKey(jobId), token, 'PX', ttlMs, 'NX');
+      return r === 'OK' ? token : null;
     } catch (e) {
       console.error('acquireLock redis error', e.message);
-      return false;
+      return null;
     }
   }
   // file/sqlite mode: simple in-process lock
   if (!inMemoryLocks.has(jobId)) {
-    inMemoryLocks.set(jobId, Date.now() + ttlMs);
-    return true;
+    inMemoryLocks.set(jobId, { token, expiresAt: Date.now() + ttlMs });
+    return token;
   }
   // check expiry
-  const exp = inMemoryLocks.get(jobId);
-  if (exp && Date.now() > exp) {
-    inMemoryLocks.set(jobId, Date.now() + ttlMs);
-    return true;
+  const lock = inMemoryLocks.get(jobId);
+  if (lock && Date.now() > lock.expiresAt) {
+    inMemoryLocks.set(jobId, { token, expiresAt: Date.now() + ttlMs });
+    return token;
   }
-  return false;
+  return null;
 }
 
-export async function releaseLock(jobId) {
+export async function extendLock(jobId, token, ttlMs = 30000) {
   if (USE_REDIS) {
     try {
       const client = await ensureRedis();
-      await client.del(REDIS_KEYS.lockKey(jobId));
+      const key = REDIS_KEYS.lockKey(jobId);
+      const script = `
+        if redis.call("GET", KEYS[1]) == ARGV[1] then
+          return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+        end
+        return 0
+      `;
+      const result = await client.eval(script, 1, key, token, String(ttlMs));
+      return Number(result) === 1;
+    } catch (e) {
+      console.error('extendLock redis error', e.message);
+      return false;
+    }
+  }
+  const lock = inMemoryLocks.get(jobId);
+  if (!lock || lock.token !== token) return false;
+  lock.expiresAt = Date.now() + ttlMs;
+  inMemoryLocks.set(jobId, lock);
+  return true;
+}
+
+export async function releaseLock(jobId, token) {
+  if (USE_REDIS) {
+    try {
+      const client = await ensureRedis();
+      if (!token) {
+        await client.del(REDIS_KEYS.lockKey(jobId));
+        return;
+      }
+      const key = REDIS_KEYS.lockKey(jobId);
+      const script = `
+        if redis.call("GET", KEYS[1]) == ARGV[1] then
+          return redis.call("DEL", KEYS[1])
+        end
+        return 0
+      `;
+      await client.eval(script, 1, key, token);
     } catch (e) {
       console.error('releaseLock redis error', e.message);
     }
     return;
   }
-  inMemoryLocks.delete(jobId);
+  const lock = inMemoryLocks.get(jobId);
+  if (!lock) return;
+  if (!token || lock.token === token) {
+    inMemoryLocks.delete(jobId);
+  }
 }
 
 export async function getJobById(jobId) {
@@ -450,6 +491,7 @@ if (USE_REDIS) {
 
 export default {
   acquireLock,
+  extendLock,
   releaseLock,
   getJobById,
   incrementJobAttempts,
@@ -464,4 +506,3 @@ export default {
   isEventProcessed,
   markEventProcessed
 };
-
