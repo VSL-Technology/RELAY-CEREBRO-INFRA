@@ -19,9 +19,11 @@ import {
   upsertRouter
 } from "../repositories/routerRepository.js";
 import { getDefaultTenant, listTenants } from "../lib/getDefaultTenant.js";
+import { mapWithConcurrency } from "../lib/concurrency.js";
 
 const DEFAULT_INTERVAL_MS = Number(process.env.RELAY_RECONCILE_INTERVAL_MS || 60000);
 const SHOULD_REMOVE = process.env.RELAY_RECONCILE_REMOVE === "1" || process.env.RELAY_RECONCILE_REMOVE === "true";
+const RECONCILE_CONCURRENCY = Math.max(1, Number(process.env.RELAY_RECONCILE_CONCURRENCY || 5));
 const SETUP_LOG_COOLDOWN_MS = 60000;
 const TENANT_AUTO_DISCOVERY_MODE = String(process.env.TENANT_AUTO_DISCOVERY_MODE || "default")
   .trim()
@@ -583,7 +585,7 @@ async function reconcileTenant({
   const autoDiscoveredPublicKeys = new Set();
   const allowAutoDiscovery = controlPlaneConfig.writeDb && usingDbDesired && !usedFallbackJson;
   if (allowAutoDiscovery) {
-    for (const item of toRemove) {
+    await mapWithConcurrency(toRemove, async (item) => {
       try {
         const discovered = await autoDiscoverPeer({
           peer: item,
@@ -604,7 +606,7 @@ async function reconcileTenant({
           message: e && e.message
         });
       }
-    }
+    }, RECONCILE_CONCURRENCY);
   }
 
   for (const a of actualScoped) {
@@ -629,7 +631,7 @@ async function reconcileTenant({
     }
   }
 
-  for (const d of desired) {
+  await mapWithConcurrency(desired, async (d) => {
     if (!bindings.find((b) => b.publicKey === d.publicKey)) {
       metrics.inc("reconciler.desired_no_binding");
       logger.warn("reconciler.desired_no_binding", {
@@ -666,9 +668,9 @@ async function reconcileTenant({
         }
       }
     }
-  }
+  }, RECONCILE_CONCURRENCY);
 
-  for (const item of toAddOrUpdate) {
+  await mapWithConcurrency(toAddOrUpdate, async (item) => {
     try {
       await wireguard.addPeer({
         deviceId: item.deviceId,
@@ -693,10 +695,10 @@ async function reconcileTenant({
         message: e && e.message
       });
     }
-  }
+  }, RECONCILE_CONCURRENCY);
 
-  for (const item of toRemove) {
-    if (autoDiscoveredPublicKeys.has(item.publicKey)) continue;
+  await mapWithConcurrency(toRemove, async (item) => {
+    if (autoDiscoveredPublicKeys.has(item.publicKey)) return;
 
     if (!SHOULD_REMOVE) {
       logger.warn("reconciler.extra_peer_detected", {
@@ -706,7 +708,7 @@ async function reconcileTenant({
         tenantSlug: tenant.slug
       });
       metrics.inc("reconciler.extra_peer");
-      continue;
+      return;
     }
     try {
       if (item.deviceId) {
@@ -717,7 +719,7 @@ async function reconcileTenant({
           tenantId: tenant.id,
           tenantSlug: tenant.slug
         });
-        continue;
+        return;
       }
       metrics.inc("reconciler.removed");
       logger.info("reconciler.peer_removed", {
@@ -736,7 +738,7 @@ async function reconcileTenant({
         message: e && e.message
       });
     }
-  }
+  }, RECONCILE_CONCURRENCY);
 
   logger.info("reconciler.tenant_cycle_done", {
     tenantId: tenant.id,
@@ -889,7 +891,7 @@ async function reconcileOnce() {
     logger.error("reconciler.peer_tenant_index_fail", { message: e && e.message });
   }
 
-  for (const tenant of tenants) {
+  await mapWithConcurrency(tenants, async (tenant) => {
     await reconcileTenant({
       tenant,
       now,
@@ -901,7 +903,7 @@ async function reconcileOnce() {
       tenantsBySlug,
       defaultTenant
     });
-  }
+  }, RECONCILE_CONCURRENCY);
 }
 
 let _timer = null;
@@ -927,7 +929,8 @@ function start() {
     controlPlaneMode: controlPlaneConfig.mode,
     fallbackJson: controlPlaneConfig.fallbackJson,
     writeDb: controlPlaneConfig.writeDb,
-    tenantAutoDiscoveryMode: NORMALIZED_TENANT_AUTO_DISCOVERY_MODE
+    tenantAutoDiscoveryMode: NORMALIZED_TENANT_AUTO_DISCOVERY_MODE,
+    concurrency: RECONCILE_CONCURRENCY
   });
 }
 
