@@ -37,6 +37,16 @@ async function processExpiredSession(session) {
       router: session.router || session.identity || null,
       result: "attempted"
     });
+
+    await sessionStore.updateSession(session.sessionId, {
+      status: "expired",
+      active: false
+    });
+    logger.info("session.expired", {
+      sessionId: session.sessionId,
+      ip: session.ip,
+      router: session.router || session.identity || null
+    });
   } catch (error) {
     logger.error("session.expire.revoke", {
       sessionId: session.sessionId,
@@ -50,17 +60,8 @@ async function processExpiredSession(session) {
       ip: session.ip,
       mac: session.mac || null,
       router: session.router || session.identity || null,
-      message: error && error.message ? error.message : String(error)
-    });
-  } finally {
-    await sessionStore.updateSession(session.sessionId, {
-      status: "expired",
-      active: false
-    });
-    logger.info("session.expired", {
-      sessionId: session.sessionId,
-      ip: session.ip,
-      router: session.router || session.identity || null
+      message: error && error.message ? error.message : String(error),
+      retry: true
     });
   }
 }
