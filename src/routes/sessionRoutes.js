@@ -226,13 +226,8 @@ router.post("/authorize", async (req, res) => {
       });
     }
 
-    const authorized = await sessionStore.updateSession(sessionId, {
-      status: "authorized",
-      plano,
-      expiresAt: Date.now() + tempo
-    });
-
-    const result = await addHotspotBinding(authorized);
+    const expiresAt = Date.now() + tempo;
+    const result = await addHotspotBinding(session);
     if (!result.ok) {
       return res.status(502).json({
         ok: false,
@@ -243,7 +238,10 @@ router.post("/authorize", async (req, res) => {
     }
 
     const activeSession = await sessionStore.updateSession(sessionId, {
-      active: true
+      status: "authorized",
+      active: true,
+      plano,
+      expiresAt
     });
 
     logger.info("session.authorize", {
