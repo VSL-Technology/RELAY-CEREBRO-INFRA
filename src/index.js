@@ -1524,7 +1524,7 @@ app.post('/relay/manager/register', async (req, res) => {
     const body = req.body || {};
     const { deviceId, deviceName, mikrotik = {}, wireguard = {} } = body;
     if (!deviceId || !mikrotik.publicIp || !mikrotik.apiUser || !mikrotik.apiPassword || !wireguard.peerPublicKey) {
-      return res.status(400).json({ ok: false, code: 'invalid_payload', message: 'deviceId, mikrotik.publicIp, mikrotik.apiUser, mikrotik.apiPassword and wireguard.peerPublicKey are required' });
+      return res.status(400).json({ ok: false, code: 'invalid_payload', message: 'mikrotik credentials are required' });
     }
 
     // Do not persist passwords. Store metadata without apiPassword.
