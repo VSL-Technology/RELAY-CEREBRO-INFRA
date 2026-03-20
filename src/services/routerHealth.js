@@ -7,6 +7,7 @@ import redis from '../lib/redis.js';
 import metrics from './metrics.js';
 import logger from './logger.js';
 import { circuitBreakerState } from '../lib/metrics.js';
+import { sendAlert } from '../lib/alerting.js';
 
 const FAILURE_THRESHOLD = parseInt(process.env.CB_FAILURE_THRESHOLD || '5', 10);
 const RECOVERY_TIMEOUT_MS = parseInt(process.env.CB_RECOVERY_TIMEOUT_MS || '60000', 10);
@@ -143,8 +144,17 @@ export function updateRouterHealth(routerId, classification) {
       router_id: routerId,
       failures: next.consecutiveFails
     });
+    void sendAlert({
+      type: 'circuit_breaker_opened',
+      router_id: routerId,
+      failures: next.consecutiveFails
+    });
   } else if (wasOpen && !isOpenNow) {
     logger.info('circuit_breaker_recovered', {
+      router_id: routerId
+    });
+    void sendAlert({
+      type: 'circuit_breaker_recovered',
       router_id: routerId
     });
   }
