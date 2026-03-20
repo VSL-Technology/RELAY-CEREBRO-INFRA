@@ -119,9 +119,30 @@ function normalizeError(error, fallbackCode) {
 }
 
 async function safeClose(resource, label, host, port) {
-  if (!resource || typeof resource.close !== "function") return;
+  if (!resource) return;
+
+  const closeMethod = typeof resource.close === "function"
+    ? "close"
+    : typeof resource.end === "function"
+      ? "end"
+      : null;
+
+  if (!closeMethod) return;
+
+  if (label === "channel" && resource.closed) return;
+
   try {
-    await Promise.resolve(resource.close());
+    if (closeMethod === "close") {
+      if (label === "connection") {
+        await Promise.resolve(resource.close(true));
+        return;
+      }
+
+      await Promise.resolve(resource.close());
+      return;
+    }
+
+    await Promise.resolve(resource.end());
   } catch (closeError) {
     logger.warn("mikrotik.close_error", {
       label,
@@ -156,7 +177,8 @@ export async function runMikrotikCommands(mik, sentences) {
 
     connection = await getConnection(cfg.host, cfg.user, cfg.pass, {
       port: cfg.port,
-      timeout: DEFAULT_TIMEOUT_MS
+      timeout: DEFAULT_TIMEOUT_MS,
+      closeOnDone: true
     });
 
     channel = connection.openChannel();
@@ -223,7 +245,9 @@ export async function runMikrotikCommands(mik, sentences) {
     };
   } finally {
     await safeClose(channel, "channel", host, port);
-    await safeClose(connection, "connection", host, port);
+    if (!channel) {
+      await safeClose(connection, "connection", host, port);
+    }
   }
 }
 
