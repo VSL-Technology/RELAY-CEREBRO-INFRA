@@ -2,7 +2,7 @@
 set -e
 
 echo "==> Verificando variáveis obrigatórias..."
-REQUIRED_VARS="RELAY_MASTER_KEY REDIS_URL RELAY_API_SECRET MIKROTIK_NODES"
+REQUIRED_VARS="RELAY_MASTER_KEY REDIS_URL HMAC_SECRET MIKROTIK_NODES"
 for var in $REQUIRED_VARS; do
   if [ -z "$(eval echo \$$var)" ]; then
     echo "ERRO: $var não está definido"
