@@ -1,45 +1,60 @@
 // src/services/logger.js
 // Simple structured JSON logger. Lightweight, no external deps.
-import util from 'util';
+import util from "util";
+import { getRequestContext } from "../lib/requestContext.js";
 
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
-const DEFAULT_LEVEL = process.env.RELAY_LOG_LEVEL || 'info';
+const DEFAULT_LEVEL = process.env.RELAY_LOG_LEVEL || "info";
 
 function now() {
   return new Date().toISOString();
 }
 
 function serializeArgs(args) {
-  return args.map(a => {
-    if (a instanceof Error) {
-      return { message: a.message, stack: a.stack };
+  return args.map((arg) => {
+    if (arg instanceof Error) {
+      return { message: arg.message, stack: arg.stack };
     }
-    if (typeof a === 'object') return a;
-    return String(a);
+    if (typeof arg === "object") return arg;
+    return String(arg);
   });
 }
 
-function log(level, ...args) {
+function applyBindings(entry, bindings = {}) {
+  for (const [key, value] of Object.entries(bindings)) {
+    if (value === undefined) continue;
+    if (key === "ts" || key === "level" || key === "pid" || key === "msg" || key === "meta") continue;
+    entry[key] = value;
+  }
+}
+
+function write(level, bindings, args) {
+  const requestContext = getRequestContext();
   const entry = {
     ts: now(),
     level,
     pid: process.pid,
-    msg: '',
+    msg: "",
+    reqId: bindings.reqId ?? requestContext.reqId ?? null
   };
+
+  applyBindings(entry, bindings);
+
   const parts = serializeArgs(args);
-  if (parts.length === 1 && typeof parts[0] === 'string') {
+  if (parts.length === 1 && typeof parts[0] === "string") {
     entry.msg = parts[0];
   } else {
-    entry.msg = parts.map(p => (typeof p === 'string' ? p : util.inspect(p, { depth: 5 }))).join(' ');
+    entry.msg = parts.map((part) => (typeof part === "string" ? part : util.inspect(part, { depth: 5 }))).join(" ");
   }
-  // attach any object payloads under `meta`
-  const meta = parts.filter(p => typeof p === 'object' && !(p instanceof Error));
-  if (meta.length) entry.meta = meta.length === 1 ? meta[0] : meta;
-  // print JSON
+
+  const meta = parts.filter((part) => typeof part === "object" && !(part instanceof Error));
+  if (meta.length) {
+    entry.meta = meta.length === 1 ? meta[0] : meta;
+  }
+
   try {
-    process.stdout.write(JSON.stringify(entry) + '\n');
-  } catch (e) {
-    // fallback
+    process.stdout.write(JSON.stringify(entry) + "\n");
+  } catch (error) {
     console.log(entry.ts, level, entry.msg);
   }
 }
@@ -48,17 +63,23 @@ function levelEnabled(level) {
   return LEVELS[level] >= LEVELS[DEFAULT_LEVEL];
 }
 
-export function debug(...args) { if (levelEnabled('debug')) log('debug', ...args); }
-export function info(...args) { if (levelEnabled('info')) log('info', ...args); }
-export function warn(...args) { if (levelEnabled('warn')) log('warn', ...args); }
-export function error(...args) { if (levelEnabled('error')) log('error', ...args); }
+function withBindings(level, bindings, args) {
+  if (levelEnabled(level)) {
+    write(level, bindings || {}, args);
+  }
+}
+
+export function debug(...args) { withBindings("debug", {}, args); }
+export function info(...args) { withBindings("info", {}, args); }
+export function warn(...args) { withBindings("warn", {}, args); }
+export function error(...args) { withBindings("error", {}, args); }
 
 export function child(bindings = {}) {
   return {
-    debug: (...a) => debug({ ...bindings }, ...a),
-    info: (...a) => info({ ...bindings }, ...a),
-    warn: (...a) => warn({ ...bindings }, ...a),
-    error: (...a) => error({ ...bindings }, ...a),
+    debug: (...args) => withBindings("debug", bindings, args),
+    info: (...args) => withBindings("info", bindings, args),
+    warn: (...args) => withBindings("warn", bindings, args),
+    error: (...args) => withBindings("error", bindings, args)
   };
 }
 

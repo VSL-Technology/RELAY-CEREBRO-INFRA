@@ -1,10 +1,10 @@
 import "./bootstrap/env.js";
 
 // src/index.js
-import crypto from "crypto";
+import crypto, { randomUUID } from "crypto";
 import express from "express";
 import morgan from "morgan";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import {
   authorizeByPedido,
   resyncDevice,
@@ -44,6 +44,14 @@ import redis, { assertRedisReady } from "./lib/redis.js";
 import { buildSentence } from "./lib/buildSentence.js";
 import { ensureDefaultTenant } from "./bootstrap/ensureDefaultTenant.js";
 import healthRoute, { healthLiveRoute, healthReadyRoute } from "./routes/healthRoute.js";
+import { runWithRequestContext } from "./lib/requestContext.js";
+import {
+  isValidIp,
+  isValidMac,
+  normalizeIp,
+  normalizeMac,
+  normalizeMacAddress
+} from "./lib/validators.js";
 
 const RELAY_API_SECRET = process.env.RELAY_API_SECRET || null;
 if (!RELAY_API_SECRET) {
@@ -52,12 +60,33 @@ if (!RELAY_API_SECRET) {
 
 // basic rate limiter (express-rate-limit)
 const rateWindowMs = Number(process.env.RELAY_RATE_WINDOW_MS || 60000);
-const rateLimitMax = Number(process.env.RELAY_RATE_LIMIT || 60);
+const rateLimitMax = Number(process.env.RATE_LIMIT_PER_ROUTER || process.env.RELAY_RATE_LIMIT || 60);
+function extractRouterRateLimitKey(req) {
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const query = req.query && typeof req.query === "object" ? req.query : {};
+  const headerRouterId = req.headers["x-router-id"];
+  const routerId = [
+    body.routerId,
+    body.mikId,
+    body.router,
+    query.routerId,
+    query.mikId,
+    query.router,
+    headerRouterId
+  ]
+    .map((value) => String(value || "").trim())
+    .find(Boolean);
+
+  if (routerId) return `router:${routerId}`;
+  return `ip:${ipKeyGenerator(req.ip || "")}`;
+}
+
 const limiter = rateLimit({
   windowMs: rateWindowMs,
   max: rateLimitMax,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => extractRouterRateLimitKey(req),
 });
 
 const app = express();
@@ -241,9 +270,16 @@ async function validateRelayAuth(req, res, next) {
 
 
 // Keep morgan for access logs, but keep minimal formatting to avoid double-logging
-app.use(morgan("combined"));
-// Rate limit simples por IP
-app.use(limiter);
+morgan.token("request-id", (req) => req.requestId || "-");
+app.use((req, res, next) => {
+  const incomingRequestId = String(req.headers["x-request-id"] || "").trim();
+  const reqId = incomingRequestId || randomUUID();
+  req.id = reqId;
+  req.requestId = reqId;
+  res.setHeader("X-Request-ID", reqId);
+  runWithRequestContext({ reqId }, () => next());
+});
+app.use(morgan(':remote-addr - :remote-user [:date[clf]] ":method :url HTTP/:http-version" :status :res[content-length] ":referrer" ":user-agent" req_id=:request-id'));
 
 // Dedicated webhook route must run before JSON parser to preserve raw stream.
 app.use(pagarmeWebhookRoutes);
@@ -254,6 +290,9 @@ app.use(express.json({
     req.rawBody = Buffer.from(buf);
   },
 }));
+
+// Global rate limit keyed by routerId when available, falling back to IP.
+app.use(limiter);
 
 // Public healthcheck for deploy validation
 app.get("/health/live", healthLiveRoute);
@@ -280,8 +319,10 @@ app.use("/session", sessionRoutes);
 app.post("/session/start", async (req, res) => {
   try {
     const body = req.body || {};
-    const ip = typeof body.ip === "string" ? body.ip.trim() : "";
-    const mac = typeof body.mac === "string" ? body.mac.trim() : null;
+    const ip = String(body.ip || "").trim();
+    const mac = body.mac === undefined || body.mac === null || body.mac === ""
+      ? null
+      : String(body.mac).trim();
     const router = typeof body.router === "string" ? body.router.trim() : null;
     const identity = typeof body.identity === "string" ? body.identity.trim() : null;
 
@@ -292,10 +333,24 @@ app.post("/session/start", async (req, res) => {
         message: "ip required"
       });
     }
+    if (!isValidIp(ip)) {
+      return res.status(400).json({
+        ok: false,
+        code: "invalid_ip",
+        message: "invalid IP format"
+      });
+    }
+    if (mac && !isValidMac(mac)) {
+      return res.status(400).json({
+        ok: false,
+        code: "invalid_mac",
+        message: "invalid MAC format"
+      });
+    }
 
     const session = await sessionStore.createSession({
-      ip,
-      mac,
+      ip: normalizeIp(ip),
+      mac: mac ? normalizeMac(mac) : null,
       router,
       identity
     });
@@ -521,6 +576,8 @@ app.post("/relay/device/hello", authMiddleware, (req, res) => {
   const ip = normalizeClientIp(req.ip);
   try {
     const { deviceToken, mikId, ip: bodyIp, mac, userAgent } = req.body;
+    const normalizedBodyIp = normalizeIp(bodyIp);
+    const normalizedMac = isValidMac(mac) ? normalizeMac(mac) : null;
 
     if (!mikId || !bodyIp || !mac) {
       logger.warn("device_hello.rejected", { reason: "missing_fields", ip, mikId });
@@ -528,6 +585,32 @@ app.post("/relay/device/hello", authMiddleware, (req, res) => {
         ok: false,
         code: "invalid_payload",
         error: "Campos obrigatórios: mikId, ip, mac"
+      });
+    }
+    if (!isValidIp(bodyIp)) {
+      logger.warn("device_hello.rejected", {
+        reason: "invalid_ip",
+        ip,
+        mikId,
+        bodyIp
+      });
+      return res.status(400).json({
+        ok: false,
+        code: "invalid_ip",
+        message: "invalid IP format"
+      });
+    }
+    if (!normalizedMac) {
+      logger.warn("device_hello.rejected", {
+        reason: "invalid_mac",
+        ip,
+        mikId,
+        mac
+      });
+      return res.status(400).json({
+        ok: false,
+        code: "invalid_mac",
+        message: "invalid MAC format"
       });
     }
 
@@ -543,7 +626,13 @@ app.post("/relay/device/hello", authMiddleware, (req, res) => {
       logger.warn("device_hello.mikid_validation_skipped", { reason: e.code, ip, mikId });
     }
 
-    const dev = registerOrUpdateDevice({ deviceToken, mikId, ip: bodyIp, mac, userAgent });
+    const dev = registerOrUpdateDevice({
+      deviceToken,
+      mikId,
+      ip: normalizedBodyIp,
+      mac: normalizedMac,
+      userAgent
+    });
 
     res.json({
       ok: true,
@@ -595,23 +684,6 @@ function pickFirst(value, keys) {
   return null;
 }
 
-function normalizeIpv4(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return null;
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(raw)) return null;
-  const octets = raw.split(".").map((o) => Number(o));
-  if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
-  return raw;
-}
-
-function normalizeMacAddress(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return null;
-  const normalized = raw.replace(/-/g, ":").toUpperCase();
-  if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(normalized)) return null;
-  return normalized;
-}
-
 function ensureSafeToken(value, fieldName) {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -622,10 +694,11 @@ function ensureSafeToken(value, fieldName) {
 }
 
 function getRequestId(req) {
+  if (req && typeof req.id === "string" && req.id.trim()) {
+    return req.id.trim();
+  }
   const value = req && req.headers ? req.headers["x-request-id"] : null;
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed || null;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function escapeRouterOsQuoted(value) {
@@ -1028,7 +1101,7 @@ async function handleArpLookup(req, res) {
   try {
     const body = req.body || {};
     const { mikId } = body;
-    const ip = body.ip ? normalizeIpv4(body.ip) : null;
+    const ip = body.ip ? normalizeIp(body.ip) : null;
     const mac = body.mac ? normalizeMacAddress(body.mac) : null;
     if (!assertMikrotikEligible(mikId, res)) return;
     if (body.ip && !ip) {
@@ -1121,7 +1194,7 @@ async function handleHotspotKick(req, res, forcedCriteria = null) {
     const inputMac = forcedCriteria && forcedCriteria.mac !== undefined ? forcedCriteria.mac : body.mac;
     const inputUser = forcedCriteria && forcedCriteria.user !== undefined ? forcedCriteria.user : body.user;
 
-    const ip = inputIp ? normalizeIpv4(inputIp) : null;
+    const ip = inputIp ? normalizeIp(inputIp) : null;
     const mac = inputMac ? normalizeMacAddress(inputMac) : null;
     const user = inputUser ? ensureSafeToken(inputUser, "user") : null;
 
