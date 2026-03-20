@@ -4,6 +4,10 @@ import sessionStore from "../services/sessionStore.js";
 import { runMikrotikCommands } from "../services/mikrotik.js";
 import { buildSentence } from "../lib/buildSentence.js";
 import { isValidIp, isValidMac, normalizeMac } from "../lib/validators.js";
+import {
+  authorizationDuration,
+  authorizationTotal
+} from "../lib/metrics.js";
 
 const router = express.Router();
 const PRINT_BINDING_COMMAND = "/ip/hotspot/ip-binding/print";
@@ -197,6 +201,10 @@ router.post("/init", async (req, res) => {
 });
 
 router.post("/authorize", async (req, res) => {
+  const started = Date.now();
+  let routerId = "unknown";
+  let metricsRecorded = false;
+
   try {
     const body = req.body || {};
     const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
@@ -226,9 +234,15 @@ router.post("/authorize", async (req, res) => {
       });
     }
 
+    routerId = String(session.router || session.identity || "").trim() || "unknown";
     const expiresAt = Date.now() + tempo;
     const result = await addHotspotBinding(session);
     if (!result.ok) {
+      const duration = (Date.now() - started) / 1000;
+      authorizationDuration.observe({ router_id: routerId, status: "failure" }, duration);
+      authorizationTotal.inc({ router_id: routerId, status: "failure" });
+      metricsRecorded = true;
+
       return res.status(502).json({
         ok: false,
         code: "EXEC_ERROR",
@@ -244,6 +258,11 @@ router.post("/authorize", async (req, res) => {
       expiresAt
     });
 
+    const duration = (Date.now() - started) / 1000;
+    authorizationDuration.observe({ router_id: routerId, status: "success" }, duration);
+    authorizationTotal.inc({ router_id: routerId, status: "success" });
+    metricsRecorded = true;
+
     logger.info("session.authorize", {
       sessionId: activeSession.sessionId,
       ip: activeSession.ip,
@@ -258,6 +277,12 @@ router.post("/authorize", async (req, res) => {
       result
     });
   } catch (error) {
+    if (!metricsRecorded) {
+      const duration = (Date.now() - started) / 1000;
+      authorizationDuration.observe({ router_id: routerId, status: "failure" }, duration);
+      authorizationTotal.inc({ router_id: routerId, status: "failure" });
+    }
+
     logger.error("session.authorize_error", {
       message: error && error.message ? error.message : String(error)
     });
