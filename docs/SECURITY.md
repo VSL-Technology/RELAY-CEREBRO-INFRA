@@ -8,3 +8,4 @@
 - **WireGuard**: habilite `RELAY_RECONCILE_REMOVE=1` apenas quando seguro; alinhe mapeamento publicKey->deviceId via `peerBinding` para evitar peers órfãos.
 - **Tokens/rotação**: planeje rotação periódica de `RELAY_TOKEN`, `RELAY_API_SECRET` e `RELAY_MASTER_KEY`; exponha novos valores via secret manager e reinicie o relay de forma coordenada.
 - **Ambientes**: mantenha `RELAY_DRY_RUN=1` em ambientes de teste para evitar comandos reais; em produção, desabilite e configure todos os segredos.
+- **Pré-deploy**: execute `scripts/pre-deploy.sh` antes de cada release para validar Redis, segredos e migração de `devices.json`.

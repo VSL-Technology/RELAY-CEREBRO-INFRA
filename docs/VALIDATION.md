@@ -17,6 +17,8 @@ npm install          # se ainda não instalou
 npm run start        # inicia em modo DRY_RUN
 ```
 
+> `npm test` usa mock de `ioredis`, então a suíte local não precisa de Redis real para passar.
+
 ## 3) Exercitar endpoints
 Defina um helper simples para assinar requests:
 ```bash

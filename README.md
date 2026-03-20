@@ -61,3 +61,4 @@ npm start
 - Use `scripts/pre-deploy.sh` antes do deploy para validar variáveis, migrar `devices.json` legado e testar Redis.
 - Use `scripts/test/fullFlow.mjs` e `scripts/test/sessionTest.mjs` para smoke tests manuais.
 - Em produção, configure `RELAY_MASTER_KEY` em secret manager. Sem ela o relay perde acesso às senhas criptografadas.
+- Consulte `DEPLOY_CHECKLIST.md` como roteiro mínimo antes de publicar uma nova imagem.
