@@ -1,8 +1,26 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: relay-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
   relay:
     build: .
     container_name: relay-real
     restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
 
     env_file:
       - .env
@@ -44,3 +62,6 @@ services:
       - "traefik.http.routers.relay.middlewares=relay-health@docker"
       - "traefik.http.middlewares.relay-health.replacepathregex.regex=^/health$"
       - "traefik.http.middlewares.relay-health.replacepathregex.replacement=/health/live"
+
+volumes:
+  redis_data:
