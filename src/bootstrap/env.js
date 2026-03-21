@@ -80,11 +80,16 @@ const requiredEnv = [
   "NODE_ENV"
 ];
 
-for (const key of requiredEnv) {
-  if (!String(process.env[key] || "").trim()) {
-    bootError(`missing env: ${key}`);
-    process.exit(1);
-  }
+// Diagnóstico profissional: mostra qual variável falta e como debugar
+const missing = requiredEnv.filter(key => !String(process.env[key] || "").trim());
+if (missing.length > 0) {
+  bootError(`missing required env: ${missing.join(", ")}`);
+  bootError(`\n⚠️  DIAGNÓSTICO:`);
+  bootError(`   1. Verifique se .env existe no diretório: ls -la .env`);
+  bootError(`   2. Verifique se docker carregou as vars: docker exec relay-real printenv | grep -E "${missing.join("|")}"`);
+  bootError(`   3. Variáveis esperadas mas vazias:${missing.map(k => `\n      - ${k} = "${process.env[k] || "<vazio>"}"`).join("")}`);
+  bootError(`\n   Solução: edite .env com valores não-vazios e rode: docker-compose restart relay\n`);
+  process.exit(1);
 }
 
 bootInfo("env ok");
