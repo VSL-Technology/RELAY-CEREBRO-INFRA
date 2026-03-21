@@ -1,6 +1,7 @@
 // src/services/audit.js
 // Auditoria simples para registrar tentativas, sucessos e falhas das ações do relay
 import metrics from "./metrics.js";
+import { getRequestContext } from "../lib/requestContext.js";
 
 function makeTraceId() {
   return (Math.random() + 1).toString(36).substring(2, 9);
@@ -34,9 +35,11 @@ function now() {
 }
 
 function baseEvent(type, detail) {
+  const requestContext = getRequestContext();
   return {
     type,
     timestamp: now(),
+    reqId: requestContext.reqId || null,
     ...detail
   };
 }

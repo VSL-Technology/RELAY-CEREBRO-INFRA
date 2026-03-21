@@ -79,11 +79,16 @@ export async function getPeersStatus() {
     const dump = await callWgDump();
     const peers = parseWgDump(dump);
     const normalized = peers.map(normalizePeerStatus);
-    return { timestamp: Math.floor(Date.now() / 1000), peers: normalized };
+    return { ok: true, timestamp: Math.floor(Date.now() / 1000), peers: normalized };
   } catch (e) {
     logger.error('wireguardStatus.getPeersStatus_error', { message: e && e.message });
     // on error, return empty list but surface timestamp
-    return { timestamp: Math.floor(Date.now() / 1000), peers: [] };
+    return {
+      ok: false,
+      error: e && e.message ? e.message : 'wg_dump_failed',
+      timestamp: Math.floor(Date.now() / 1000),
+      peers: []
+    };
   }
 }
 

@@ -20,14 +20,67 @@ jobs:
             cd /opt/lopesul/apps/relay
             git fetch origin
             git reset --hard origin/main
+
+            if [ ! -f .env ]; then
+              echo "missing .env in deploy directory"
+              exit 1
+            fi
+
+            missing=0
+            for key in DATABASE_URL WG_PRIVATE_KEY WG_INTERFACE NODE_ENV; do
+              if ! grep -Eq "^${key}=.+" .env; then
+                echo "missing required env: ${key}"
+                missing=1
+              fi
+            done
+            if ! grep -Eq "^(HMAC_SECRET|RELAY_API_SECRET)=.+" .env; then
+              echo "missing required env: HMAC_SECRET (or RELAY_API_SECRET)"
+              missing=1
+            fi
+            if [ "$missing" -ne 0 ]; then
+              exit 1
+            fi
+
             docker compose down
             docker compose build
             docker compose up -d
 
             echo "Aguardando container iniciar..."
-            sleep 6
+            retries=30
+            status="unknown"
+            while [ $retries -gt 0 ]; do
+              status=$(docker inspect -f '{{.State.Status}}' relay-real 2>/dev/null || echo "missing")
+              if [ "$status" = "running" ]; then
+                break
+              fi
+              echo "relay-real status: $status (tentativas restantes: $retries)"
+              sleep 2
+              retries=$((retries-1))
+            done
+            if [ "$status" != "running" ]; then
+              echo "Container não chegou em running"
+              docker compose ps
+              docker compose logs -n 200 --no-color relay || docker logs --tail 200 relay-real || true
+              exit 1
+            fi
 
             echo "Testando health dentro do container..."
-            docker exec relay-real node -e "fetch('http://localhost:3000/health').then(async (r) => { if (!r.ok) throw new Error('health status ' + r.status); const body = await r.json(); if (body.status !== 'ok') throw new Error('invalid health payload'); console.log('health ok'); }).catch((err) => { console.error(err.message); process.exit(1); })" || exit 1
+            health_ok=0
+            for attempt in $(seq 1 20); do
+              echo "Healthcheck tentativa ${attempt}/20..."
+              if docker exec relay-real node -e "const port=process.env.PORT||3000;fetch('http://127.0.0.1:'+port+'/health').then(async (r) => { const raw = await r.text(); if (r.status !== 200) throw new Error('health status ' + r.status + ' body=' + raw); let body = {}; try { body = JSON.parse(raw); } catch (_) {} if (body.status !== 'ok') throw new Error('invalid health payload body=' + raw); console.log('health ok port=' + port); }).catch((err) => { console.error('healthcheck_error: ' + err.message); process.exit(1); })"; then
+                health_ok=1
+                break
+              fi
+              echo "Healthcheck tentativa ${attempt} falhou"
+              sleep 2
+            done
+
+            if [ "$health_ok" -ne 1 ]; then
+              echo "Healthcheck falhou; coletando logs"
+              docker compose ps
+              docker compose logs -n 200 --no-color relay || docker logs --tail 200 relay-real || true
+              exit 1
+            fi
 
             echo "Relay saudável."

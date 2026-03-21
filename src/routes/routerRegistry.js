@@ -13,7 +13,7 @@ router.post('/routers/register', async (req, res) => {
     const body = req.body || {};
     const { deviceId, mikrotikPublicKey, tunnelIp, allowedIps, endpoint, keepalive, presharedKey, mikrotik = {} } = body;
     if (!deviceId || !mikrotikPublicKey || !tunnelIp || !mikrotik.publicIp || !mikrotik.apiUser || !mikrotik.apiPassword) {
-      return res.status(400).json({ ok: false, code: 'invalid_payload', message: 'deviceId, mikrotikPublicKey, tunnelIp, mikrotik.publicIp, mikrotik.apiUser, mikrotik.apiPassword são obrigatórios' });
+      return res.status(400).json({ ok: false, code: 'invalid_payload', message: 'mikrotik credentials are required' });
     }
 
     const allowed = allowedIps || `${tunnelIp}/32`;

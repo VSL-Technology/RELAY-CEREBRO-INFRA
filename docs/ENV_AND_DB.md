@@ -1,9 +1,9 @@
 # Variáveis de ambiente e dados compartilhados (Relay ↔ Backend)
 
 ## Segredos compartilhados com o backend
-- `RELAY_TOKEN`: token base para rotas gerais (`x-relay-token`). Se ausente, o relay usa fallback para `RELAY_TOKEN_TOOLS`/`RELAY_TOKEN_EXEC`.
-- `RELAY_API_SECRET`: HMAC para POST/DELETE/SYNC; backend deve assinar o body e enviar `x-relay-signature` (hex).
-- `RELAY_INTERNAL_TOKEN`: protege endpoints internos; não deve sair do ambiente controlado.
+- `RELAY_TOKEN`: token Bearer único para rotas `/relay/*`, `/internal/*` e, quando `SESSION_PUBLIC=false`, `/session/*`.
+- `RELAY_API_SECRET`: HMAC para requests protegidas; o caller deve enviar `x-relay-signature: v1=<hex>`, `x-relay-ts` e `x-relay-nonce`.
+- `RELAY_MASTER_KEY`: chave AES-256-GCM usada para criptografar/descriptografar segredos em `devices.json`.
 - `PAGARME_WEBHOOK_SECRET`: valida assinatura do webhook `/api/webhooks/pagarme`.
 - `BACKEND_HMAC_SECRET`: HMAC bidirecional para tráfego de eventos/ACKs (`BACKEND_EVENTS_URL` e `BACKEND_ACK_URL`); precisa ser igual em ambos.
 
@@ -14,8 +14,9 @@
 - `BACKEND_ACK_RETRIES`, `BACKEND_ACK_RETRY_DELAY_MS`: tentativas e atraso para ACK.
 
 ## Segurança e política
-- `RELAY_STRICT_SECURITY` (1/0): se 1, relay exige `RELAY_API_SECRET` e `RELAY_INTERNAL_TOKEN` no boot.
-- `RELAY_RATE_WINDOW_MS`, `RELAY_RATE_LIMIT`: rate-limit por IP.
+- `RELAY_STRICT_SECURITY` (1/0): se 1, relay exige Bearer/HMAC válidos no boot.
+- `RELAY_RATE_WINDOW_MS`, `RELAY_RATE_LIMIT`: parâmetros base da janela de rate-limit.
+- `RATE_LIMIT_PER_ROUTER`: limite efetivo por roteador quando `routerId`/`mikId` estiver disponível.
 - `RELAY_OFFLINE_MAX_AGE_SEC`: recusa ações se peer WG estiver offline há mais que X s (quando `peerPublicKey` é enviado no payload).
 
 ## WireGuard / Mikrotik
@@ -31,9 +32,11 @@
 - `RELAY_USE_SQLITE` (1/0): usa SQLite em `data/relay.db`.
 - `RELAY_STORE=redis`: usa Redis; requer `REDIS_URL` e `RELAY_NAMESPACE`.
 - `RELAY_JOB_MAX_ATTEMPTS`, `RELAY_JOB_BACKOFF_BASE_MS`, `RELAY_LOCK_TTL_MS`: política de retries/lock.
+- `RELAY_LOCK_HEARTBEAT_INTERVAL_MS`: intervalo do heartbeat que renova o TTL dos locks durante execução longa.
 
 ## DRY_RUN e testes
 - `RELAY_DRY_RUN` (1/0): não executa comandos reais (Mikrotik/WG); usar 1 em dev/teste.
+- `SESSION_MONITOR_CONCURRENCY`, `SESSION_CLEANER_CONCURRENCY`: paralelismo dos jobs de sessão.
 - `PORT`: porta HTTP (default 3001).
 
 ## Integração com banco de dados do backend
@@ -45,7 +48,7 @@ O relay atualmente persiste em arquivos/Redis/SQLite. Para consultar dados reais
 - Riscos: compartilhar o mesmo banco aumenta acoplamento; defina SLA e monitore conexões/latência. Considere um replica/read-replica se houver carga.
 
 ## Checklist mínimo (prod)
-1) `RELAY_TOKEN`, `RELAY_API_SECRET`, `RELAY_INTERNAL_TOKEN`, `BACKEND_HMAC_SECRET` definidos e roteados via secret manager.
+1) `RELAY_TOKEN`, `RELAY_API_SECRET`, `RELAY_MASTER_KEY` e `BACKEND_HMAC_SECRET` definidos e roteados via secret manager.
 2) `WG_INTERFACE`, `WG_VPS_PUBLIC_KEY`, `WG_VPS_ENDPOINT` configurados; reconciliador habilitado com intervalos seguros.
 3) `BACKEND_EVENTS_URL`/`BACKEND_ACK_URL` ativos e assinando com `BACKEND_HMAC_SECRET`.
 4) Decisão sobre `RELAY_RECONCILE_REMOVE` (0 inicialmente) e `RELAY_OFFLINE_MAX_AGE_SEC`.

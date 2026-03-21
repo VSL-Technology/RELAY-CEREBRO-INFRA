@@ -7,10 +7,9 @@ services:
     env_file:
       - .env
 
-    # 👇 Compartilha a stack de rede do host (necessário para enxergar wg0)
-    network_mode: host
+    # precisa pra enxergar wg0 do host
+    network_mode: "host"
 
-    # 🔐 Permissões necessárias para WireGuard
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
@@ -22,26 +21,26 @@ services:
       - no-new-privileges:true
       - apparmor=unconfined
 
-    # 🧠 Healthcheck interno
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health/live"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
-
-    # 📊 Limite básico de memória
-    deploy:
-      resources:
-        limits:
-          memory: 512M
+      start_period: 60s
 
     labels:
       - "traefik.enable=true"
+
+      # Router
       - "traefik.http.routers.relay.rule=Host(`relay.3fconnet.cloud`)"
       - "traefik.http.routers.relay.entrypoints=websecure"
       - "traefik.http.routers.relay.tls.certresolver=le"
-      - "traefik.http.services.relay.loadbalancer.server.port=3000"
-      - "traefik.http.middlewares.relay-sec.headers.sslRedirect=true"
-      - "traefik.http.middlewares.relay-sec.headers.stsSeconds=31536000"
-      - "traefik.http.routers.relay.middlewares=relay-sec@docker"
+
+      # Service (AQUI é onde tava o inferno)
+      # Aponta o Traefik pro HOST via gateway da rede docker
+      - "traefik.http.services.relay.loadbalancer.server.url=http://GATEWAY_IP:3000"
+
+      # opcional: se você quiser que /health vire /health/live
+      - "traefik.http.routers.relay.middlewares=relay-health@docker"
+      - "traefik.http.middlewares.relay-health.replacepathregex.regex=^/health$"
+      - "traefik.http.middlewares.relay-health.replacepathregex.replacement=/health/live"

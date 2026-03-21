@@ -1,64 +1,64 @@
 # Relay Cérebro Infra
 
-Control-plane do relay (cérebro) já na versão “v3”: identidade persistente, idempotência, health model por roteador, HMAC obrigatório e tokens por escopo.
+Control-plane do relay com identidade persistente, HMAC obrigatório, segredos criptografados em repouso, locks distribuídos, circuit breaker em Redis e rotas de sessão/Hotspot apoiadas em Redis.
 
-## Visão geral
-- **Autenticação forte**: Bearer por escopo (`TOOLS`, `EXEC`, `INTERNAL`) + HMAC (`x-relay-signature` v1, `x-relay-ts`, `x-relay-nonce`) com proteção contra replay.
-- **Identidade v3**: `sid` persistente, pending/applied/failed com idempotência e backoff (`AUTHORIZE_PENDING`), status público/ops e retry-now ops-only.
-- **Circuit breaker**: health por roteador (WireGuard/Mikrotik) com classificação de erro (setup/auth/transiente), backoff e give-up cliente-first.
-- **Endpoints chave**:
-  - `GET /relay/health` (barato, protegido por token)
-  - `GET /relay/identity/status` (public/ops)
-  - `POST /relay/identity/retry-now` (ops)
-  - `/relay/ping`, `/relay/arp-print`, `/relay/exec-by-device` (TOOLS/EXEC + HMAC + circuit breaker)
-- **Observabilidade**: métricas Prometheus, logs estruturados, códigos de erro estáveis, testes de regressão.
-
-## Requisitos
-- Node.js 18+ (ESM).
-- `npm install` para dependências.
+## Arquitetura
+- **Borda HTTP** em [src/index.js](/Users/victorsantos/Desktop/AREA%20DE%20TRABALHO/RELAY-CEREBRO-INFRA/src/index.js): health, métricas, identidade, WireGuard interno, sessões e `device/hello`.
+- **Segurança**: Bearer `RELAY_TOKEN` + HMAC `RELAY_API_SECRET`, janela de 300s, nonce dedup em Redis, `X-Request-ID` em toda resposta e logs com `reqId`.
+- **Estado distribuído**: circuit breaker por roteador em Redis, `identityStore` com `SET NX`, jobs com lock renovável por heartbeat e sessões persistidas em Redis.
+- **Escala Fase 2**: rate limit por `routerId`, validação e normalização de IP/MAC, parsers compartilhados de Hotspot e processamento paralelo com limite de concorrência.
+- **Segredos**: `devices.json` usa AES-256-GCM com `RELAY_MASTER_KEY`; sem essa chave as senhas antigas não podem ser lidas.
 
 ## Setup rápido
-1. Copie `.env.example` para `.env` e preencha:
-   - `RELAY_API_SECRET`, `RELAY_TOKEN_TOOLS`, `RELAY_TOKEN_EXEC`, `RELAY_INTERNAL_TOKEN` (opcional `RELAY_TOKEN_HEALTH`).
-   - `MIKROTIK_NODES` (JSON) e `WG_INTERFACE` fora de DRY_RUN.
-   - `RELAY_DRY_RUN=1` para simular sem tocar Mikrotik/WG.
-2. Instale e teste:
-   ```bash
-   npm install
-   npm test -- --runInBand
-   ```
-3. Suba o relay:
-   ```bash
-   npm start   # ou node src/index.js
-   ```
+1. Copie `.env.example` para `.env`.
+2. Preencha no mínimo `RELAY_TOKEN`, `RELAY_API_SECRET`, `RELAY_MASTER_KEY`, `REDIS_URL` e `MIKROTIK_NODES`.
+3. Instale dependências e rode os testes:
+```bash
+npm install
+npm test
+```
+4. Suba o serviço:
+```bash
+npm start
+```
 
-## Assinatura HMAC
-- Headers: `Authorization: Bearer <token do escopo>` (ou `x-relay-token`), `x-relay-ts`, `x-relay-nonce`, `x-relay-signature: v1=<hex>`.
-- Canonical: `METHOD\nPATH_WITH_QUERY\nTS\nNONCE\nBODY_SHA256`.
-- Janela ±120s; nonce TTL 5 min.
+## HMAC
+- Headers: `Authorization: Bearer <RELAY_TOKEN>`, `x-relay-ts`, `x-relay-nonce`, `x-relay-signature: v1=<hex>`.
+- Canonical usado pelo código: `METHOD\nPATH\nTS\nNONCE\nJSON_BODY`.
+- O nonce é salvo em Redis pelo período de `HMAC_WINDOW_MS` para bloquear replay.
+- As rotas `/relay/*` e `/internal/*` usam o mesmo Bearer + HMAC.
 
-## Fluxo de identidade (v3)
-- Backend emite `PAYMENT_CONFIRMED(sid, pedidoId, planId, routerId?)`.
-- Backend/portal chama `POST /relay/identity/refresh` com `sid/ip/mac/identity/routerHint`.
-- Falha transiente → agenda `AUTHORIZE_PENDING` (backoff 2s→240s) e responde `pending_authorization`.
-- Após 8 tentativas falhas → `FAILED` com cooldown, histórico preservado para ops.
-- Status público: `authorized/pending/failed/no_pending_payment` + `retryInMs`. Ops (com `X-Relay-Internal`) vê pending/applied/lastSeen/health.
+## Variáveis de ambiente
+- `RELAY_TOKEN`: token Bearer principal do relay.
+- `RELAY_API_SECRET`: segredo HMAC usado nas rotas protegidas.
+- `RELAY_MASTER_KEY`: chave AES-256-GCM para criptografia de segredos em repouso.
+- `DATABASE_URL`: conexão do banco usado pelo control plane/Prisma.
+- `REDIS_URL`: URL de conexão principal com Redis.
+- `REDIS_HOST`: host Redis usado quando `REDIS_URL` não for informado.
+- `REDIS_PORT`: porta Redis usada quando `REDIS_URL` não for informado.
+- `REDIS_PASSWORD`: senha Redis usada quando `REDIS_URL` não for informado.
+- `REDIS_REQUIRED`: se `true`, o boot falha quando Redis estiver indisponível.
+- `MIKROTIK_NODES`: JSON com os roteadores MikroTik conhecidos pelo relay.
+- `CB_FAILURE_THRESHOLD`: número de falhas consecutivas para abrir o circuit breaker.
+- `CB_RECOVERY_TIMEOUT_MS`: tempo de espera antes de permitir nova tentativa no circuit breaker.
+- `HMAC_WINDOW_MS`: janela máxima de tolerância para timestamp HMAC.
+- `RELAY_RATE_WINDOW_MS`: tamanho da janela do rate limiter global.
+- `RELAY_RATE_LIMIT`: limite legado de requisições por janela.
+- `RATE_LIMIT_PER_ROUTER`: limite efetivo por roteador quando `routerId` estiver disponível.
+- `WG_INTERFACE`: interface WireGuard local.
+- `WG_VPS_PUBLIC_KEY`: chave pública do VPS WireGuard.
+- `WG_VPS_ENDPOINT`: endpoint público do VPS WireGuard.
+- `CONTROL_PLANE_MODE`: modo do control plane.
+- `CONTROL_PLANE_FALLBACK_JSON`: permite fallback para JSON quando DB não estiver disponível.
+- `CONTROL_PLANE_WRITE_DB`: habilita escrita do estado reconciliado no banco.
+- `JOB_RUNNER_ENABLED`: habilita o job runner no boot.
+- `SESSION_PUBLIC`: permite rotas `/session/*` sem autenticação Bearer/HMAC.
+- `SESSION_MONITOR_CONCURRENCY`: número de sessões processadas em paralelo no monitor.
+- `SESSION_CLEANER_CONCURRENCY`: número de sessões expiradas processadas em paralelo no cleaner.
+- `PORT`: porta HTTP do serviço.
 
-## Health e bind seguro
-- `GET /relay/health` não toca Mikrotik/WG/state; protegido por token.
-- Produção: `BIND_HOST=127.0.0.1` e expose via proxy.
-
-## Estrutura
-- `src/` serviços do relay (auth/HMAC, identity, health, WG/Mikrotik, reconciler, jobRunner).
-- `__tests__/` regressões: lazy Mikrotik env, DRY_RUN, WG env, state machine, probe.
-- `docs/` contratos e visão de arquitetura.
-
-## Comandos úteis
-- Métricas: `GET /relay/metrics`.
-- Status identidade: `GET /relay/identity/status?sid=...` (public/ops).
-- Retry manual (ops): `POST /relay/identity/retry-now` com `X-Relay-Internal`.
-
-## Notas de produção
-- Circuit breaker retorna `router_circuit_open` em EXEC/TOOLS quando health está aberto.
-- Evite retry automático de POST no caller; use idempotência do relay.
-- Para múltiplas instâncias, migrar `identityStore` para SQLite/Redis mantendo a interface.
+## Operação
+- Use `scripts/pre-deploy.sh` antes do deploy para validar variáveis, migrar `devices.json` legado e testar Redis.
+- Use `scripts/test/fullFlow.mjs` e `scripts/test/sessionTest.mjs` para smoke tests manuais.
+- Em produção, configure `RELAY_MASTER_KEY` em secret manager. Sem ela o relay perde acesso às senhas criptografadas.
+- Consulte `DEPLOY_CHECKLIST.md` como roteiro mínimo antes de publicar uma nova imagem.
