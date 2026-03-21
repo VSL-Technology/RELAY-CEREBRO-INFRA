@@ -56,12 +56,21 @@ function parseOptionalJsonEnv(envName) {
   }
 }
 
-const dotenvResult = dotenv.config({ quiet: true });
-if (dotenvResult.error) {
-  bootError("dotenv failed");
-  process.exit(1);
+// Only load .env in development — in production, env vars come from container/deployment
+if (process.env.NODE_ENV !== "production") {
+  const dotenvResult = dotenv.config({ quiet: true });
+  if (dotenvResult.error && process.env.NODE_ENV === "development") {
+    // In development, .env is optional but log if missing
+    bootInfo("dotenv: .env file not found (ok in production)");
+  } else if (dotenvResult.error) {
+    bootError("dotenv failed");
+    process.exit(1);
+  } else {
+    bootInfo("dotenv ok");
+  }
+} else {
+  bootInfo("dotenv: skipped in production (using env vars)");
 }
-bootInfo("dotenv ok");
 
 const requiredEnv = [
   "DATABASE_URL",
