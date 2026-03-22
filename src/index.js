@@ -193,7 +193,7 @@ async function verifyHmac(req) {
   }
 
   const body = req.body ? JSON.stringify(req.body) : "";
-  const base = `${req.method}\n${req.path}\n${ts}\n${nonce}\n${body}`;
+  const base = `${req.method}\n${req.originalUrl}\n${ts}\n${nonce}\n${body}`;
 
   const expected = crypto
     .createHmac("sha256", secret)
