@@ -558,12 +558,25 @@ app.get("/relay/status", authMiddleware, async (req, res) => {
     const uptime = process.uptime();
     const wgStatus = await wireguardStatus.getPeersStatus().catch(() => ({ ok: false }));
 
+    // Extract active peer info (prefer ONLINE, fallback to first peer)
+    const activePeer = wgStatus?.peers?.find(p => p.status === 'ONLINE')
+      || wgStatus?.peers?.[0]
+      || null;
+
+    const wireguardPeer = activePeer ? {
+      ip: activePeer.allowedIps?.split('/')[0] || null,
+      endpoint: activePeer.endpoint || null,
+      status: activePeer.status || null,
+      handshakeAge: activePeer.handshakeAge || null
+    } : null;
+
     res.json({
       ok: true,
       status: wgStatus.ok ? "ok" : "degraded",
       uptime: Math.floor(uptime),
       database: "connected",
       wireguard: wgStatus.ok ? "interface_ok" : "interface_error",
+      wireguardPeer,
       hmac: RELAY_API_SECRET ? "loaded" : "missing",
       env: "valid",
       timestamp: Math.floor(Date.now() / 1000)
