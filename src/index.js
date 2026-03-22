@@ -551,6 +551,58 @@ app.get("/relay/health", (req, res) => {
   res.status(200).json({ status: "ok" });
 });
 
+// Relay status endpoint (for Dashboard monitoring)
+app.get("/relay/status", authMiddleware, async (req, res) => {
+  try {
+    const uptime = process.uptime();
+    const wgStatus = await wireguardStatus.getPeersStatus().catch(() => ({ ok: false }));
+
+    res.json({
+      ok: true,
+      status: wgStatus.ok ? "ok" : "degraded",
+      uptime: Math.floor(uptime),
+      database: "connected",
+      wireguard: wgStatus.ok ? "interface_ok" : "interface_error",
+      hmac: RELAY_API_SECRET ? "loaded" : "missing",
+      env: "valid",
+      timestamp: Math.floor(Date.now() / 1000)
+    });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      error: e.message,
+      timestamp: Math.floor(Date.now() / 1000)
+    });
+  }
+});
+
+// WireGuard detailed status (for Dashboard monitoring)
+app.get("/relay/wireguard/status", authMiddleware, async (req, res) => {
+  try {
+    const peersData = await wireguardStatus.getPeersStatus();
+
+    res.json({
+      ok: peersData.ok,
+      interface: process.env.WG_INTERFACE || "wg0",
+      status: peersData.ok ? "interface_ok" : "interface_error",
+      peers: peersData.peers || [],
+      peersCount: (peersData.peers || []).length,
+      timestamp: peersData.timestamp,
+      error: peersData.error || null
+    });
+  } catch (e) {
+    res.json({
+      ok: false,
+      interface: process.env.WG_INTERFACE || "wg0",
+      status: "interface_error",
+      peers: [],
+      peersCount: 0,
+      error: e.message,
+      timestamp: Math.floor(Date.now() / 1000)
+    });
+  }
+});
+
 // Basic identity for backend UI (HMAC-protected)
 app.get("/relay/identity", (req, res) => {
   res.json({
