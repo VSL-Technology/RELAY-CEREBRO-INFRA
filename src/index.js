@@ -192,9 +192,10 @@ async function verifyHmac(req) {
     throw new Error("HMAC_TS_OUT_OF_RANGE");
   }
 
-  const body = req.body ? JSON.stringify(req.body) : "";
+  const body = (req.body && Object.keys(req.body).length > 0) ? JSON.stringify(req.body) : "";
   const base = `${req.method}\n${req.originalUrl}\n${ts}\n${nonce}\n${body}`;
 
+  console.error("[HMAC_DEBUG] base=", JSON.stringify(base), "secret=", secret.slice(0,8));
   const expected = crypto
     .createHmac("sha256", secret)
     .update(base)
