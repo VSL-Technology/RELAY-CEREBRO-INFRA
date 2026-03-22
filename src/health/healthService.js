@@ -19,7 +19,23 @@ function checkWireguardInterface() {
   try {
     execSync(`wg show ${iface}`, { stdio: "ignore" });
     return "interface_ok";
-  } catch (_) {
+  } catch (e) {
+    // Fallback: check if interface exists via ip link (no sudo required)
+    const msg = e && (e.message || e.stderr || '') || '';
+    const isPermissionError = msg.includes('Operation not permitted')
+      || msg.includes('EPERM')
+      || (e.code === 1 && msg.includes('Unable to access'));
+
+    if (isPermissionError) {
+      try {
+        execSync(`ip link show ${iface}`, { stdio: "ignore" });
+        // Interface exists but we can't read detailed status
+        return "interface_ok";
+      } catch (_) {
+        return "missing_interface";
+      }
+    }
+
     return "missing_interface";
   }
 }

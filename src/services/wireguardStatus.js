@@ -23,6 +23,30 @@ async function callWgDump() {
     const { stdout } = await execFile('wg', ['show', 'all', 'dump']);
     return stdout || '';
   } catch (e) {
+    // Fallback: check if interface exists via ip link (no sudo required)
+    const msg = e && (e.message || e.stderr || '');
+    const isPermissionError = msg.includes('Operation not permitted')
+      || msg.includes('EPERM')
+      || (e.code === 1 && msg.includes('Unable to access'));
+
+    if (isPermissionError) {
+      logger.warn('wireguardStatus.wg_permission_denied — trying ip link fallback');
+      try {
+        const { execFile: _execFile2 } = await import('child_process');
+        const { promisify: promisify2 } = await import('util');
+        const execFile2 = promisify2(_execFile2);
+        const iface = WG_INTERFACE || 'wg0';
+        const { stdout: ipOut } = await execFile2('ip', ['link', 'show', iface]);
+        if (ipOut && ipOut.includes(iface)) {
+          logger.info('wireguardStatus.interface_detected_via_ip_link');
+          // Return special marker: interface exists but no peer details available
+          return '__INTERFACE_OK_NO_PEERS__';
+        }
+      } catch (ipErr) {
+        logger.warn('wireguardStatus.ip_link_failed', { message: ipErr && ipErr.message });
+      }
+    }
+
     logger.error('wireguardStatus.callWgDump_error', { message: e && e.message });
     throw e;
   }
@@ -32,6 +56,10 @@ async function callWgDump() {
 export function parseWgDump(dumpText) {
   const out = [];
   if (!dumpText) return out;
+  // Special case: interface detected but no peer details available (permission fallback)
+  if (dumpText === '__INTERFACE_OK_NO_PEERS__') {
+    return out; // return empty peers array
+  }
   const lines = dumpText.trim().split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   for (const line of lines) {
     // wg dump is tab-separated, fall back to whitespace split if needed
@@ -77,6 +105,16 @@ export function normalizePeerStatus(peer) {
 export async function getPeersStatus() {
   try {
     const dump = await callWgDump();
+    // Special case: interface detected via ip link but no detailed info available
+    if (dump === '__INTERFACE_OK_NO_PEERS__') {
+      logger.info('wireguardStatus.interface_ok_limited_info');
+      return {
+        ok: true,
+        timestamp: Math.floor(Date.now() / 1000),
+        peers: [],
+        note: 'interface_ok_limited_info'
+      };
+    }
     const peers = parseWgDump(dump);
     const normalized = peers.map(normalizePeerStatus);
     return { ok: true, timestamp: Math.floor(Date.now() / 1000), peers: normalized };
