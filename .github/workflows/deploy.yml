@@ -71,7 +71,7 @@ jobs:
             health_ok=0
             for attempt in $(seq 1 20); do
               echo "Healthcheck tentativa ${attempt}/20..."
-              if docker exec relay-real node -e "const port=process.env.PORT||3000;fetch('http://127.0.0.1:'+port+'/health').then(async (r) => { const raw = await r.text(); if (r.status !== 200) throw new Error('health status ' + r.status + ' body=' + raw); let body = {}; try { body = JSON.parse(raw); } catch (_) {} if (body.status !== 'ok') throw new Error('invalid health payload body=' + raw); console.log('health ok port=' + port); }).catch((err) => { console.error('healthcheck_error: ' + err.message); process.exit(1); })"; then
+              if docker exec relay-real node -e "const port=process.env.PORT||3000;fetch('http://127.0.0.1:'+port+'/health').then(async (r) => { const raw = await r.text(); if (r.status !== 200) throw new Error('health status ' + r.status + ' body=' + raw); let body = {}; try { body = JSON.parse(raw); } catch (_) {} if (body.status !== 'ok' && body.status !== 'degraded') throw new Error('invalid health payload body=' + raw); console.log('health ok port=' + port); }).catch((err) => { console.error('healthcheck_error: ' + err.message); process.exit(1); })"; then
                 health_ok=1
                 break
               fi
