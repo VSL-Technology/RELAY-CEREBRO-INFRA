@@ -17,7 +17,7 @@ function checkWireguardInterface() {
   if (!iface) return "missing_interface";
 
   try {
-    execSync(`wg show ${iface}`, { stdio: "ignore" });
+    execSync(`wg show ${iface}`, { stdio: "pipe" });
     return "interface_ok";
   } catch (e) {
     // Fallback: check if interface exists via ip link (no sudo required)
