@@ -1,0 +1,1 @@
+{"endpoint_ip":"10.200.200.6","command":"/ip/firewall/address-list/add","params":{"list":"paid_clients","address":"192.168.88.54","comment":"wifi liberado"}}
