@@ -134,6 +134,13 @@ export async function syncActiveSessions() {
     const results = await mapWithConcurrency(routerSessions, async (session) => {
       const isActive = activeSessions.some((item) => item.ip === session.ip);
 
+      // Não confiar apenas em /hotspot/active para sessões autorizadas
+      // (cliente pode estar em bypassed binding e não aparecer lá)
+      if (!isActive && session.status === "authorized") {
+        // Pular update quando authorized e ausente em /hotspot/active
+        return { sessionId: session.sessionId };
+      }
+
       await sessionStore.updateSession(session.sessionId, {
         active: isActive
       });
