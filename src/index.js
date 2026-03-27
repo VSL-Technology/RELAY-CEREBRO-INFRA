@@ -456,6 +456,50 @@ app.post("/session/start", async (req, res) => {
   }
 });
 
+
+app.post("/session/authorize", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+    const planId = typeof body.planId === "string" ? body.planId.trim() : "";
+    const pedidoId = typeof body.pedidoId === "string" ? body.pedidoId.trim() : null;
+    const tempo = Number(body.tempo) || 43200000; // default 12h
+
+    if (!sessionId) {
+      return res.status(400).json({ ok: false, code: "invalid_payload", message: "sessionId and tempo required" });
+    }
+
+    const expiresAt = new Date(Date.now() + tempo).toISOString();
+    const reqId = req.headers["x-request-id"] || "unknown";
+
+    const result = await sessionStore.authorizeSession(
+      sessionId,
+      planId,
+      pedidoId,
+      expiresAt,
+      hotspotManager,
+      reqId
+    );
+
+    return res.json({
+      ok: true,
+      sessionId,
+      status: "active",
+      planId,
+      expiresAt,
+      idempotent: result.idempotent || false
+    });
+  } catch (err) {
+    logger.error("session.authorize_endpoint_error", {
+      message: err && err.message ? err.message : String(err)
+    });
+    if (err.message && err.message.includes("session_not_found")) {
+      return res.status(404).json({ ok: false, code: "session_not_found" });
+    }
+    return res.status(500).json({ ok: false, code: "internal_error" });
+  }
+});
+
 app.post("/session/kick", async (req, res) => {
   try {
     const body = req.body || {};
