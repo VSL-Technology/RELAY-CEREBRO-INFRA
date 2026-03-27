@@ -7,10 +7,18 @@ import {
   authorizationDuration,
   authorizationTotal
 } from "../lib/metrics.js";
+import rateLimit from "express-rate-limit";
 
 const router = express.Router();
 const PRINT_BINDING_COMMAND = "/ip/hotspot/ip-binding/print";
 const REMOVE_BINDING_COMMAND = "/ip/hotspot/ip-binding/remove";
+
+const authorizeLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute window
+  max: 30, // limit each IP to 30 authorization requests per windowMs
+  standardHeaders: true,
+  legacyHeaders: false
+});
 const ADD_BINDING_COMMAND = "/ip/hotspot/ip-binding/add";
 
 function isNonEmptyString(value) {
@@ -73,21 +81,6 @@ function collectRows(result) {
   }
 
   return rows;
-}
-
-function getResultMessage(result, fallback) {
-  if (result && result.error && result.error.message) {
-    return result.error.message;
-  }
-
-  if (result && Array.isArray(result.results)) {
-    const failed = result.results.find((item) => item && item.ok === false);
-    if (failed && failed.error) {
-      return String(failed.error);
-    }
-  }
-
-  return fallback;
 }
 
 function findBindingIdByIp(result, ip) {
@@ -213,7 +206,7 @@ router.post("/init", async (req, res) => {
 // ============================================
 // POST /session/authorize
 // ============================================
-router.post("/authorize", async (req, res) => {
+router.post("/authorize", authorizeLimiter, async (req, res) => {
   const started = Date.now();
   let sessionId = "unknown";
   let routerId = "unknown";
