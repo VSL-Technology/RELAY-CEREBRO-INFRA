@@ -189,25 +189,18 @@ export async function runMikrotikCommands(mik, sentences) {
         // eslint-disable-next-line no-await-in-loop
         const reply = await new Promise((resolve, reject) => {
           const collectedData = [];
-          let hasError = false;
-          let hasTrap = false;
 
-          channel.write(cmd)
-            .on("done", (data) => {
-              if (!hasError && !hasTrap) {
-                collectedData.push(data);
-                resolve(collectedData);
-              }
-            })
-            .on("trap", (trapData) => {
-              hasTrap = true;
-              collectedData.push(trapData);
-              resolve(collectedData);
-            })
-            .on("error", (err) => {
-              hasError = true;
-              reject(err);
-            });
+          channel.once("done", (data) => {
+            resolve(data);
+          });
+          channel.once("trap", (trapData) => {
+            resolve(trapData);
+          });
+          channel.once("error", (err) => {
+            reject(err);
+          });
+
+          channel.write(cmd);
         });
 
         const trap = findReplyTrap(reply);
