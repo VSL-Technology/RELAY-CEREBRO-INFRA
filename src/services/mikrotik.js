@@ -191,22 +191,20 @@ export async function runMikrotikCommands(mik, sentences) {
             reject(new Error("MikroTik command timeout"));
           }, DEFAULT_TIMEOUT_MS);
 
-          channel.on("done", (data) => {
-            clearTimeout(timeout);
-            // mikronode-ng returns undefined for write-only commands (add, remove, set)
-            // treat as empty success
-            resolve(data === undefined ? [] : data);
+          channel.write(cmd, {}, function onWrite(ch) {
+            ch.on("done", (data) => {
+              clearTimeout(timeout);
+              resolve(Array.isArray(data) ? data : []);
+            });
+            ch.on("trap", (trapData) => {
+              clearTimeout(timeout);
+              resolve(Array.isArray(trapData) ? trapData : [trapData]);
+            });
+            ch.on("error", (err) => {
+              clearTimeout(timeout);
+              reject(err);
+            });
           });
-          channel.on("trap", (trapData) => {
-            clearTimeout(timeout);
-            resolve(trapData);
-          });
-          channel.on("error", (err) => {
-            clearTimeout(timeout);
-            reject(err);
-          });
-
-          channel.write(cmd);
         });
 
         const trap = findReplyTrap(reply);
