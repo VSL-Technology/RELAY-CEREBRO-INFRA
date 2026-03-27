@@ -174,7 +174,6 @@ async function persistSession(session, logEvent, customTtlMs = null) {
 }
 
 async function persistIndices(session, ttlMs) {
-  const ttlSeconds = Math.max(Math.ceil(ttlMs / 1000), 1);
   const updates = [];
 
   if (session.ip) {
