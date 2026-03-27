@@ -187,7 +187,29 @@ export async function runMikrotikCommands(mik, sentences) {
       const cmdLabel = Array.isArray(cmd) ? cmd.join(" ") : cmd;
       try {
         // eslint-disable-next-line no-await-in-loop
-        const reply = await channel.write(cmd);
+        const reply = await new Promise((resolve, reject) => {
+          const collectedData = [];
+          let hasError = false;
+          let hasTrap = false;
+
+          channel.write(cmd)
+            .on("done", (data) => {
+              if (!hasError && !hasTrap) {
+                collectedData.push(data);
+                resolve(collectedData);
+              }
+            })
+            .on("trap", (trapData) => {
+              hasTrap = true;
+              collectedData.push(trapData);
+              resolve(collectedData);
+            })
+            .on("error", (err) => {
+              hasError = true;
+              reject(err);
+            });
+        });
+
         const trap = findReplyTrap(reply);
 
         if (trap) {
