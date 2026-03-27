@@ -83,21 +83,6 @@ function collectRows(result) {
   return rows;
 }
 
-function getResultMessage(result, fallback) {
-  if (result && result.error && result.error.message) {
-    return result.error.message;
-  }
-
-  if (result && Array.isArray(result.results)) {
-    const failed = result.results.find((item) => item && item.ok === false);
-    if (failed && failed.error) {
-      return String(failed.error);
-    }
-  }
-
-  return fallback;
-}
-
 function findBindingIdByIp(result, ip) {
   const match = collectRows(result).find((row) => {
     const address = String(row.address || row["=address"] || "").trim();
