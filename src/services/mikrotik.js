@@ -178,7 +178,7 @@ export async function runMikrotikCommands(mik, sentences) {
     connection = await getConnection(cfg.host, cfg.user, cfg.pass, {
       port: cfg.port,
       timeout: DEFAULT_TIMEOUT_MS,
-      closeOnDone: true
+      closeOnDone: false
     });
 
     channel = connection.openChannel();
