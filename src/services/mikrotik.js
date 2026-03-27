@@ -181,22 +181,26 @@ export async function runMikrotikCommands(mik, sentences) {
       closeOnDone: false
     });
 
-    channel = connection.openChannel();
-
     for (const cmd of commands) {
       const cmdLabel = Array.isArray(cmd) ? cmd.join(" ") : cmd;
       try {
+        channel = connection.openChannel();
         // eslint-disable-next-line no-await-in-loop
         const reply = await new Promise((resolve, reject) => {
-          const collectedData = [];
+          const timeout = setTimeout(() => {
+            reject(new Error("MikroTik command timeout"));
+          }, DEFAULT_TIMEOUT_MS);
 
-          channel.once("done", (data) => {
+          channel.on("done", (data) => {
+            clearTimeout(timeout);
             resolve(data);
           });
-          channel.once("trap", (trapData) => {
+          channel.on("trap", (trapData) => {
+            clearTimeout(timeout);
             resolve(trapData);
           });
-          channel.once("error", (err) => {
+          channel.on("error", (err) => {
+            clearTimeout(timeout);
             reject(err);
           });
 
