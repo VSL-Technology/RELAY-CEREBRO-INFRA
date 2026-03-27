@@ -332,6 +332,8 @@ export async function kickSession(session) {
 
 export default {
   authorizeSessionOnRouter,
+  addBinding: authorizeSessionOnRouter,
   revokeSessionOnRouter,
+  removeBinding: revokeSessionOnRouter,
   kickSession
 };
