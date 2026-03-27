@@ -9,7 +9,19 @@ const PRINT_ACTIVE_COMMAND = "/ip/hotspot/active/print";
 const REMOVE_ACTIVE_COMMAND = "/ip/hotspot/active/remove";
 
 function resolveRouterHost(session) {
-  return String(session && (session.router || session.identity) || "").trim() || null;
+  const routerId = String(session && (session.router || session.identity) || "").trim() || null;
+  if (!routerId) return null;
+  // Try to resolve router ID to host via MIKROTIK_NODES
+  try {
+    const raw = process.env.MIKROTIK_NODES;
+    if (raw) {
+      const nodes = JSON.parse(raw);
+      const node = nodes.find(n => n.id === routerId);
+      if (node && node.host) return node.host;
+    }
+  } catch (_) {}
+  // Fallback: use routerId directly as host (for backward compat)
+  return routerId;
 }
 
 function getRouterCredentials() {
