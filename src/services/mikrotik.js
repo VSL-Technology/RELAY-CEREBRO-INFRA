@@ -193,7 +193,9 @@ export async function runMikrotikCommands(mik, sentences) {
 
           channel.on("done", (data) => {
             clearTimeout(timeout);
-            resolve(data);
+            // mikronode-ng returns undefined for write-only commands (add, remove, set)
+            // treat as empty success
+            resolve(data === undefined ? [] : data);
           });
           channel.on("trap", (trapData) => {
             clearTimeout(timeout);
