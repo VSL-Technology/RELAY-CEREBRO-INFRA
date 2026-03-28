@@ -1,0 +1,23 @@
+http:
+  routers:
+    relay:
+      rule: "Host(`relay.3fconnet.cloud`)"
+      entryPoints:
+        - websecure
+      service: relay
+      tls:
+        certResolver: le
+      middlewares:
+        - relay-health
+
+  middlewares:
+    relay-health:
+      replacePathRegex:
+        regex: "^/health$"
+        replacement: "/health/live"
+
+  services:
+    relay:
+      loadBalancer:
+        servers:
+          - url: "http://172.17.0.1:3000"
