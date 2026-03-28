@@ -21,47 +21,36 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-
     env_file:
       - .env
-
-    # precisa pra enxergar wg0 do host
     network_mode: "host"
-
+    privileged: true
+    volumes:
+      - /tmp/wg-status.txt:/tmp/wg-status.txt:ro
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
-
     devices:
       - /dev/net/tun
-
     security_opt:
-      - no-new-privileges:true
+      - no-new-privileges:false
       - apparmor=unconfined
-
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health/live"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 60s
-
     labels:
       - "traefik.enable=true"
-
-      # Router
       - "traefik.http.routers.relay.rule=Host(`relay.3fconnet.cloud`)"
       - "traefik.http.routers.relay.entrypoints=websecure"
       - "traefik.http.routers.relay.tls.certresolver=le"
-
-      # Service (AQUI é onde tava o inferno)
-      # Aponta o Traefik pro HOST via gateway da rede docker
       - "traefik.http.services.relay.loadbalancer.server.url=http://172.17.0.1:3000"
-
-      # opcional: se você quiser que /health vire /health/live
       - "traefik.http.routers.relay.middlewares=relay-health@docker"
       - "traefik.http.middlewares.relay-health.replacepathregex.regex=^/health$"
       - "traefik.http.middlewares.relay-health.replacepathregex.replacement=/health/live"
+      - "traefik.docker.network=lopesul-network"
 
 volumes:
   redis_data:
