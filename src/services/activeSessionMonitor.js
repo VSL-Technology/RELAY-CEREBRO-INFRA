@@ -11,7 +11,17 @@ const ACTIVE_PRINT_COMMAND = "/ip/hotspot/active/print";
 let activeSessionMonitorTimer = null;
 
 function resolveRouterHost(session) {
-  return String(session && (session.router || session.identity) || "").trim() || null;
+  const routerId = String(session && (session.router || session.identity) || "").trim() || null;
+  if (!routerId) return null;
+  try {
+    const raw = process.env.MIKROTIK_NODES;
+    if (raw) {
+      const nodes = JSON.parse(raw);
+      const node = nodes.find(n => n.id === routerId);
+      if (node && node.host) return node.host;
+    }
+  } catch (_) {}
+  return routerId;
 }
 
 function getRouterCredentials() {
