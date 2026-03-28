@@ -2,6 +2,7 @@ import express from "express";
 import logger from "../services/logger.js";
 import sessionStore from "../services/sessionStore.js";
 import { buildSentence } from "../lib/buildSentence.js";
+import hotspotManagerModule from "../services/hotspotManager.js";
 import { isValidIp, isValidMac, normalizeMac } from "../lib/validators.js";
 import {
   authorizationDuration,
@@ -111,15 +112,7 @@ function findBindingIdByIp(result, ip) {
 }
 
 async function addHotspotBinding(session) {
-  const mik = getRouterConfig(session);
-  const sentence = buildSentence(ADD_BINDING_COMMAND, {
-    address: session.ip,
-    type: "bypassed",
-    comment: session.sessionId
-  });
-
-  const { runMikrotikCommands } = await import("../services/mikrotik.js");
-  return runMikrotikCommands(mik, [sentence]);
+  return hotspotManagerModule.authorizeSessionOnRouter(session);
 }
 
 async function removeHotspotBinding(session) {
