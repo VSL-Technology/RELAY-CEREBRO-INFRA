@@ -14,6 +14,21 @@ async function callWgDump() {
     logger.info('wireguardStatus.dry_run');
     return '';
   }
+
+  const WG_STATUS_FILE = process.env.WG_STATUS_FILE;
+  if (WG_STATUS_FILE) {
+    try {
+      const { readFile } = await import('fs/promises');
+      const content = await readFile(WG_STATUS_FILE, 'utf-8');
+      if (content && content.trim()) {
+        logger.info('wireguardStatus.using_file_status', { file: WG_STATUS_FILE });
+        return content;
+      }
+    } catch (_) {
+      // Silently continue to command execution if file read fails
+    }
+  }
+
   try {
     // prefer per-interface if configured for less noise
     if (WG_INTERFACE) {
