@@ -502,7 +502,7 @@ app.post("/session/authorize", async (req, res) => {
 
 
 // Aliases para compatibilidade com relayClient.ts
-app.post("/relay/hotspot/authorize", authMiddleware, hmacMiddleware, async (req, res) => {
+app.post("/relay/hotspot/authorize", authMiddleware, async (req, res) => {
   try {
     const body = req.body || {};
     const { sessionId, ip, mac, router, planId, tempo } = body;
@@ -524,7 +524,7 @@ app.post("/relay/hotspot/authorize", authMiddleware, hmacMiddleware, async (req,
   }
 });
 
-app.post("/relay/hotspot/revoke", authMiddleware, hmacMiddleware, async (req, res) => {
+app.post("/relay/hotspot/revoke", authMiddleware, async (req, res) => {
   try {
     const body = req.body || {};
     const { ip, mac, router } = body;
