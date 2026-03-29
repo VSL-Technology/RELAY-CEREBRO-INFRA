@@ -500,6 +500,44 @@ app.post("/session/authorize", async (req, res) => {
   }
 });
 
+
+// Aliases para compatibilidade com relayClient.ts
+app.post("/relay/hotspot/authorize", authMiddleware, hmacMiddleware, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { sessionId, ip, mac, router, planId, tempo } = body;
+
+    // Garante que a sessão existe no relay
+    if (!sessionId) return res.status(400).json({ ok: false, code: "missing_sessionId" });
+
+    // Cria sessão se não existir
+    await sessionStore.getOrCreateSession({ sessionId, ip, mac, router, identity: router });
+
+    // Autoriza
+    const result = await hotspotManager.authorizeSessionOnRouter({ sessionId, ip, mac, router });
+    return res.json({ ok: true, result });
+  } catch (err) {
+    logger.error("relay.hotspot.authorize_error", {
+      message: err && err.message ? err.message : String(err)
+    });
+    return res.status(500).json({ ok: false, code: "internal_error" });
+  }
+});
+
+app.post("/relay/hotspot/revoke", authMiddleware, hmacMiddleware, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { ip, mac, router } = body;
+    const result = await hotspotManager.revokeSessionOnRouter({ sessionId: `revoke-${ip}`, ip, mac, router });
+    return res.json({ ok: true, result });
+  } catch (err) {
+    logger.error("relay.hotspot.revoke_error", {
+      message: err && err.message ? err.message : String(err)
+    });
+    return res.status(500).json({ ok: false, code: "internal_error" });
+  }
+});
+
 app.post("/session/kick", async (req, res) => {
   try {
     const body = req.body || {};
