@@ -505,16 +505,17 @@ app.post("/session/authorize", async (req, res) => {
 app.post("/relay/hotspot/authorize", authMiddleware, async (req, res) => {
   try {
     const body = req.body || {};
-    const { sessionId, ip, mac, router, planId, tempo } = body;
+    const { sessionId, ip, mac, router, identity, planId, tempo } = body;
+    const routerId = router || identity || null;
 
     // Garante que a sessão existe no relay
     if (!sessionId) return res.status(400).json({ ok: false, code: "missing_sessionId" });
 
     // Cria sessão se não existir
-    await sessionStore.getOrCreateSession({ sessionId, ip, mac, router, identity: router });
+    await sessionStore.getOrCreateSession({ sessionId, ip, mac, router: routerId, identity: routerId });
 
     // Autoriza
-    const result = await hotspotManager.authorizeSessionOnRouter({ sessionId, ip, mac, router });
+    const result = await hotspotManager.authorizeSessionOnRouter({ sessionId, ip, mac, router: routerId });
     return res.json({ ok: true, result });
   } catch (err) {
     logger.error("relay.hotspot.authorize_error", {
@@ -527,8 +528,9 @@ app.post("/relay/hotspot/authorize", authMiddleware, async (req, res) => {
 app.post("/relay/hotspot/revoke", authMiddleware, async (req, res) => {
   try {
     const body = req.body || {};
-    const { ip, mac, router } = body;
-    const result = await hotspotManager.revokeSessionOnRouter({ sessionId: `revoke-${ip}`, ip, mac, router });
+    const { ip, mac, router, identity } = body;
+    const routerId = router || identity || null;
+    const result = await hotspotManager.revokeSessionOnRouter({ sessionId: `revoke-${ip}`, ip, mac, router: routerId });
     return res.json({ ok: true, result });
   } catch (err) {
     logger.error("relay.hotspot.revoke_error", {
